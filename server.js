@@ -443,25 +443,33 @@ function callbackAllowed(u) {
 async function webhookLog(entry) {
   try { await store.push(WEBHOOK_LOG, JSON.stringify(Object.assign({ at: now() }, entry)), 50, 30 * 24 * 3600); } catch (e) { /* never break the webhook */ }
 }
+// Opus may key fields by generated ids (workflow_input_xxxx, route UUIDs); the display
+// name ("Hold Ctx", "Reviewer Note", "r_reprocess") is what identifies them.
+function fieldName(key, spec) {
+  const label = (spec && (spec.display_name || spec.displayName)) || key;
+  return String(label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
 function unwrapInputs(inputs) {
   const out = {};
   Object.keys(inputs || {}).forEach((k) => {
     const v = inputs[k];
     let val = v && typeof v === 'object' && 'value' in v ? v.value : v;
     if (typeof val === 'string' && /^[\[{]/.test(val.trim())) { try { val = JSON.parse(val); } catch (e) { /* keep text */ } }
-    out[k] = val;
+    out[fieldName(k, v && typeof v === 'object' ? v : null)] = val;
   });
   return out;
 }
 
-app.post('/api/opus/webhook', wrap(async (req, res) => {
+// The secret can come in the X-Webhook-Secret header or as the last part of the URL
+// (/api/opus/webhook/<secret>) for setups that cannot send custom headers.
+app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) => {
   const headerNames = Object.keys(req.headers).filter((h) => /^x-|^authorization$/.test(h));
   if (!WEBHOOK_SECRET) {
     await webhookLog({ accepted: false, reason: 'Webhook secret not set on the console', headers: headerNames });
     return res.status(503).json({ error: 'Webhook not configured.' });
   }
-  if (!sameSecret(req.headers[WEBHOOK_HEADER], WEBHOOK_SECRET)) {
-    await webhookLog({ accepted: false, reason: 'Missing or wrong ' + WEBHOOK_HEADER + ' header', headers: headerNames });
+  if (!sameSecret(req.headers[WEBHOOK_HEADER], WEBHOOK_SECRET) && !sameSecret(req.params.key, WEBHOOK_SECRET)) {
+    await webhookLog({ accepted: false, reason: req.params.key ? 'Wrong secret in the webhook address' : 'Missing or wrong ' + WEBHOOK_HEADER + ' header', headers: headerNames });
     return res.status(401).json({ error: 'Not authorised.' });
   }
   const b = req.body || {};
@@ -483,7 +491,7 @@ app.post('/api/opus/webhook', wrap(async (req, res) => {
   const key = o ? o.id : 'X-' + b.execution_id;
   const review = {
     status: 'open', receivedAt: now(), executionId: b.execution_id, workflowId: b.workflow_id || null,
-    orderId, inputs, outputs: Object.keys(b.expected_output_schema || {}),
+    orderId, inputs, outputs: Object.keys(b.expected_output_schema || {}).map((k) => fieldName(k, b.expected_output_schema[k])),
     schema: b.expected_output_schema || null, unmatched: !o
   };
   await store.hset(REVIEW_SECRET_KEY, key, JSON.stringify({ url: cb.url, token: cb.token, token_header: cb.token_header || 'X-Opus-Callback-Token' }));
@@ -507,12 +515,12 @@ function buildOutputs(review, decision, note, corrected) {
   const declared = review.schema ? Object.keys(review.schema) : Object.keys(values);
   const out = {};
   declared.forEach((k) => {
-    if (k in values) {
-      const spec = (review.schema || {})[k] || {};
+    const spec = (review.schema || {})[k] || {};
+    const name = fieldName(k, spec); // send under Opus's own key, chosen by display name
+    if (name in values) {
       // A non-nullable object with nothing to send gets an empty object rather than null.
-      out[k] = values[k] === null && spec.is_nullable === false && /object/.test(spec.type || '') ? {} : values[k];
+      out[k] = values[name] === null && spec.is_nullable === false && /object/.test(spec.type || '') ? {} : values[name];
     } else {
-      const spec = review.schema[k] || {};
       out[k] = spec.is_nullable === false ? (/bool/.test(spec.type || '') ? false : /object/.test(spec.type || '') ? {} : /float|int/.test(spec.type || '') ? 0 : '') : null;
     }
   });

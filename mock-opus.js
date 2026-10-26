@@ -14,13 +14,14 @@
  *                         step's input schemas keep (order_id), as Opus would
  */
 const crypto = require('crypto');
+// Same keys and display names as the off-platform "Fallout Desk Review" node (version 111).
 const REVIEW_SCHEMA = {
-  reviewer_note: { type: 'str', variable_name: 'reviewer_note', is_nullable: false },
-  corrected_payload: { type: 'object', variable_name: 'corrected_payload', is_nullable: true },
-  hold_ctx: { type: 'object', variable_name: 'hold_ctx', is_nullable: false },
-  r_reprocess: { type: 'bool', variable_name: 'r_reprocess', is_nullable: false },
-  r_cancel_package: { type: 'bool', variable_name: 'r_cancel_package', is_nullable: false },
-  r_cancel_order: { type: 'bool', variable_name: 'r_cancel_order', is_nullable: false }
+  workflow_output_3c05j0plr: { type: 'str', display_name: 'Reviewer Note', variable_name: 'workflow_output_3c05j0plr', is_nullable: false },
+  workflow_output_c3gbpt161: { type: 'object', display_name: 'Corrected Payload', variable_name: 'workflow_output_c3gbpt161', is_nullable: false },
+  workflow_output_smryboi7t: { type: 'object', display_name: 'Hold Ctx', variable_name: 'workflow_output_smryboi7t', is_nullable: false },
+  '6f323a03-7af1-4cbf-a2ec-b12edb48cb32': { type: 'bool', display_name: 'r_reprocess', variable_name: '6f323a03-7af1-4cbf-a2ec-b12edb48cb32', is_nullable: false },
+  '387ada50-2b2c-48b3-b49e-a07450d47776': { type: 'bool', display_name: 'r_cancel_package', variable_name: '387ada50-2b2c-48b3-b49e-a07450d47776', is_nullable: false },
+  'a3f62f7e-a571-4dce-9574-c2b06f071307': { type: 'bool', display_name: 'r_cancel_order', variable_name: 'a3f62f7e-a571-4dce-9574-c2b06f071307', is_nullable: false }
 };
 const express = require('express');
 
@@ -149,8 +150,8 @@ function createMock() {
     const body = {
       execution_id: exec, workflow_id: c.workflowId, workflow_name: 'Connect and Activate - Order to Activation Orchestrator',
       inputs: {
-        order_state: { type: 'object', display_name: 'Order State', variable_name: 'order_state', value: process.env.MOCK_FULL_INPUTS === '1' ? { status: 'HELD' } : {} },
-        hold_ctx: { type: 'object', display_name: 'Hold Ctx', variable_name: 'hold_ctx', value: holdCtx }
+        workflow_input_nvt4xa64h: { type: 'object', display_name: 'Order State', variable_name: 'workflow_input_nvt4xa64h', value: { order_id: os.order_id, order_status: 'HELD' } },
+        workflow_input_3t25o528j: { type: 'object', display_name: 'Hold Ctx', variable_name: 'workflow_input_3t25o528j', value: holdCtx }
       },
       callback: { url: self + '/v1/execution/callback/' + exec, token: c.exec.token, token_header: 'X-Opus-Callback-Token' },
       expected_output_schema: REVIEW_SCHEMA
