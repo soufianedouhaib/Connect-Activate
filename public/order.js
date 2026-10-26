@@ -20,7 +20,7 @@
     function load(force) {
       CA.api('GET', '/api/orders/' + encodeURIComponent(id) + (force ? '?force=1' : '')).then(function (d) {
         // Don't redraw under someone typing a note unless the order actually moved on.
-        var typing = document.activeElement && document.activeElement.id === 'note';
+        var typing = document.activeElement && (document.activeElement.id === 'note' || document.activeElement.id === 'corr');
         if (!typing || d.order.stage !== lastStage) render(d.order);
         lastStage = d.order.stage;
         clearTimeout(timer);
@@ -31,7 +31,8 @@
     }
 
     function render(o) {
-      var rec = o.record || {}, res = o.result || {};
+      var rec = o.record || {}, res = o.result || (o.review && o.review.facts) || {};
+      var keepCorr = document.getElementById('corr') ? document.getElementById('corr').value : '';
       var cust = rec.customer || {}, svc = rec.service || {}, plan = rec.plan || {}, modem = rec.modem || {};
       // Keep what the reviewer is typing across auto-refreshes.
       var keepNote = document.getElementById('note') ? document.getElementById('note').value : '';
@@ -48,6 +49,7 @@
 
       wire(o);
       if (document.getElementById('note') && keepNote) document.getElementById('note').value = keepNote;
+      if (document.getElementById('corr') && keepCorr) document.getElementById('corr').value = keepCorr;
       if (decision) { var r = document.querySelector('input[name="decision"][value="' + decision + '"]'); if (r) { r.checked = true; r.closest('.choice').classList.add('on'); } }
       startCountdown(o);
       if (firstRender) { firstRender = false; document.title = o.orderId + ' · Connect & Activate'; }
@@ -70,9 +72,20 @@
           (o.pollError ? '<p class="small" style="color:var(--bad);margin-top:6px">Last status check failed: ' + esc(o.pollError) + '</p>' : '') + '</div></div></section>';
       }
       if (o.stage === 'with_desk') {
-        return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('pause') + '</div><div><h2>Held · waiting on the Fallout Desk</h2>' +
-          '<p>At least one package could not be completed automatically. The order is on hold, the responsible team has been alerted, and the Fallout Desk review step in Opus is open.</p>' +
-          '<p class="small muted" style="margin-top:8px">Time left in the review window: <span class="countdown" id="cd">—</span>. Once the desk decides, the customer delay notice is drafted and the result appears here.</p></div></div></section>';
+        var rv = o.review, f = (rv && rv.facts) || {};
+        var inConsole = rv && rv.status === 'open';
+        var sent = rv && rv.status === 'sent';
+        var facts = f.primary_error_code || f.escalation_reason || f.review_queue || f.attempts_made != null
+          ? '<div class="tiles">' +
+            tile('Error', f.primary_error_code ? '<span class="code-chip">' + esc(f.primary_error_code) + '</span>' : '—', true, o.errorText) +
+            tile('Why it was held', CA.REASONS[f.escalation_reason] || CA.words(f.escalation_reason) || '—') +
+            tile('Review queue', CA.QUEUES[f.review_queue] || CA.words(f.review_queue) || '—') +
+            tile('Attempts made', f.attempts_made == null ? '—' : String(f.attempts_made)) + '</div>'
+          : (rv ? '<p class="small muted" style="margin-top:12px">The review task arrived with only the order number; error details appear once the run finishes.</p>' : '');
+        return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('pause') + '</div><div><h2>Held · ' + (sent ? 'decision sent, finishing the run' : 'waiting on the Fallout Desk') + '</h2>' +
+          '<p>' + (sent ? 'The desk\'s decision was accepted by the workflow. The customer delay notice is being drafted and the result will appear here.'
+            : 'At least one package could not be completed automatically. The order is on hold and the responsible team has been alerted. ' + (inConsole ? 'The review task is here in the console — decide it in the Fallout Desk panel.' : 'Waiting for the review task to reach the console.')) + '</p>' +
+          (sent ? '' : '<p class="small muted" style="margin-top:8px">Time left in the review window: <span class="countdown" id="cd">—</span>.</p>') + '</div></div>' + facts + '</section>';
       }
       if (o.stage === 'activated' || o.stage === 'validation_gap') {
         var ok = o.stage === 'activated';
@@ -130,7 +143,11 @@
         if ((res.completed_packages || []).indexOf(type) >= 0) return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
         return { cls: '', state: 'Not reported', note: PKG_NOTE[type] };
       }
-      if (o.stage === 'with_desk') return { cls: '', state: 'Awaiting review', note: 'Which package failed is reported after the review' };
+      if (o.stage === 'with_desk') {
+        if ((res.held_packages || []).indexOf(type) >= 0) return { cls: 'held', state: 'Escalated', note: res.primary_error_code ? res.primary_error_code + ' · ' + (o.errorText || '') : 'Needs a decision' };
+        if ((res.completed_packages || []).indexOf(type) >= 0) return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
+        return { cls: '', state: 'Awaiting review', note: 'Reported after the review' };
+      }
       return { cls: '', state: 'Not reported', note: 'The run stopped before reporting packages' };
     }
 
@@ -162,7 +179,7 @@
         var waiting = o.stage === 'with_desk';
         steps.push(stage('held', 'alert', 'Results combined · held', waiting ? 'At least one package was escalated.' : esc((res.held_packages || []).map(function (p) { return PKG_LABEL[p] || p; }).join(', ')) + ' escalated.'));
         steps.push(stage('held', 'send', 'Team alerted', waiting ? 'The responsible queue was messaged in team chat.' : esc(CA.QUEUES[res.review_queue] || res.review_queue || 'The responsible queue') + ' was messaged in team chat.'));
-        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? 'Open in Opus — reprocess, cancel the package or cancel the order.' : (o.resolution ? 'Recorded here: ' + esc(o.resolution.label) + '.' : 'Decided in Opus; no resolution recorded here yet.')));
+        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open — reprocess, cancel the package or cancel the order.') : (o.resolution ? (o.resolution.sentToOpus ? 'Decided in the console: ' : 'Recorded here: ') + esc(o.resolution.label) + '.' : 'Decided in Opus; no resolution recorded here yet.')));
         steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer delay notice', waiting ? '' : 'Sent by ' + esc(CA.channel(res.customer_channel)) + '.'));
         steps.push(stage(waiting ? 'skip' : 'held', waiting ? 'clock' : 'pause', 'Hold recorded', waiting ? '' : 'The order stays on hold until it is reprocessed or cancelled.'));
       }
@@ -195,12 +212,34 @@
       if (o.stage !== 'held' && o.stage !== 'with_desk') return '';
       var head = '<section class="card"><div class="card-head"><div><h2>Fallout Desk</h2><p>' + esc(CA.QUEUES[res.review_queue] || 'Dispatch Support') + ' decides how to resolve the hold.</p></div></div>';
       var opusLink = '<a class="btn small" href="' + esc(me.opusReviewUrl) + '" target="_blank" rel="noopener">' + icon('external') + 'Open Opus reviews</a>';
+      var rv = o.review;
+      if (rv && rv.status === 'open' && !o.resolution) {
+        if (!isDesk) return head + '<p class="small">The desk is reviewing this order now.</p></section>';
+        return head +
+          '<div class="alert info" style="margin-bottom:14px"><strong>Decide here</strong>Your decision goes straight back to the workflow, which then drafts the customer notice and records the hold.</div>' +
+          '<div class="choices" role="radiogroup" aria-label="Resolution">' +
+          choice('reprocess', 'Reprocess the order', 'Fix what is needed and run it again.') +
+          choice('cancel_package', 'Cancel the affected package', 'Keep the rest of the order, drop the failing part.') +
+          choice('cancel_order', 'Cancel the entire order', 'Stop the order and tell the customer.') + '</div>' +
+          '<label class="field" style="margin-top:12px"><span>Reviewer note</span><textarea id="note" placeholder="What you found and why you chose this resolution."></textarea></label>' +
+          (rv.outputs.indexOf('corrected_payload') >= 0 || !rv.outputs.length ? '<details style="margin-top:10px"><summary class="small" style="cursor:pointer;color:var(--brand-ink)">Add corrected details (optional)</summary>' +
+            '<textarea class="code" id="corr" spellcheck="false" style="min-height:140px;margin-top:8px" placeholder="{ &quot;order_id&quot;: &quot;' + esc(o.orderId) + '&quot;, … }"></textarea><p class="hint">Only when reprocessing needs changed details. Must be a JSON object.</p></details>' : '') +
+          '<div id="d-err" class="alert bad" hidden style="margin-top:10px"></div>' +
+          '<button class="btn primary block" type="button" id="send" style="margin-top:12px">' + icon('send') + 'Send decision</button></section>';
+      }
+      if (rv && rv.status === 'closed' && !o.resolution && isDesk) {
+        head += '<div class="alert warn" style="margin-bottom:12px">' + esc(rv.error || 'This review task is closed in Opus.') + '</div>';
+      }
       if (o.resolution) {
-        return head + '<dl class="kv"><dt>Resolution</dt><dd><strong>' + esc(o.resolution.label) + '</strong></dd><dt>Note</dt><dd>' + esc(o.resolution.note) + '</dd><dt>Recorded by</dt><dd>' + esc(o.resolution.by) + ', ' + esc(CA.fmtDate(o.resolution.at, true)) + '</dd></dl>' +
+        return head + '<dl class="kv"><dt>Resolution</dt><dd><strong>' + esc(o.resolution.label) + '</strong></dd><dt>Note</dt><dd>' + esc(o.resolution.note) + '</dd><dt>' + (o.resolution.sentToOpus ? 'Decided by' : 'Recorded by') + '</dt><dd>' + esc(o.resolution.by) + ', ' + esc(CA.fmtDate(o.resolution.at, true)) + '</dd>' +
+          (o.resolution.sentToOpus ? '<dt>Workflow</dt><dd><span class="pill ok">Accepted by Opus</span></dd>' : '') + '</dl>' +
           (isDesk && o.stage === 'held' && !o.reprocessedAs ? '<div class="toolbar" style="margin-top:14px"><button class="btn small" type="button" id="reproc">' + icon('refresh') + 'Send again for processing</button></div>' : '') + '</section>';
       }
       if (!isDesk) {
         return head + '<p class="small">' + (o.stage === 'with_desk' ? 'The desk is reviewing this order now.' : 'No resolution has been recorded yet.') + '</p></section>';
+      }
+      if (o.stage === 'with_desk' && me.webhookMode && !(rv && rv.status === 'closed')) {
+        return head + '<p class="small">Waiting for the review task to arrive from the workflow. It usually comes within a few seconds of the hold; the decision panel appears here when it does.</p></section>';
       }
       var intro = o.stage === 'with_desk'
         ? '<div class="alert warn" style="margin-bottom:14px"><strong>Decide in Opus first</strong>The review step is a task in Opus. Choose the resolution there; you can note it here at the same time.</div>'
@@ -253,6 +292,16 @@
         CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/resolution', { decision: pick.value, note: document.getElementById('note').value })
           .then(function (d) { decision = null; document.getElementById('note').value = ''; render(d.order); CA.toast('Resolution recorded.'); })
           .catch(function (e) { err.textContent = e.message; err.hidden = false; });
+      });
+      if ((el = document.getElementById('send'))) el.addEventListener('click', function () {
+        var err = document.getElementById('d-err'); err.hidden = true;
+        var pick = document.querySelector('input[name="decision"]:checked');
+        if (!pick) { err.textContent = 'Choose one resolution.'; err.hidden = false; return; }
+        var btn = this; btn.disabled = true; btn.textContent = 'Sending…';
+        var corr = document.getElementById('corr');
+        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/decide', { decision: pick.value, note: document.getElementById('note').value, correctedText: corr ? corr.value : '' })
+          .then(function (d) { decision = null; render(d.order); CA.toast('Decision sent to the workflow.'); clearTimeout(timer); timer = setTimeout(load, 3000); })
+          .catch(function (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; btn.innerHTML = icon('send') + 'Send decision'; });
       });
       if ((el = document.getElementById('reproc'))) el.addEventListener('click', function () { reprocess(o); });
       if ((el = document.getElementById('del'))) el.addEventListener('click', function () {

@@ -8,6 +8,7 @@
     var app = document.getElementById('app');
     app.innerHTML = '<div class="page-head"><div><p class="crumb"><a href="/settings.html">Settings</a> / System</p><h1>System</h1><p>Deployment details for IT and support.</p></div></div>' +
       '<div class="stack"><section class="card" id="dep">Loading…</section>' +
+      '<section class="card flush" id="webhook"><div class="card-head pad"><div><h2>Fallout Desk webhook</h2><p>Where the workflow\'s off-platform review step sends its tasks, and the last calls it made.</p></div></div><div id="wh" style="padding:0 18px 18px">Loading…</div></section>' +
       '<section class="card flush" id="runlogs"><div class="card-head pad"><div><h2>Run logs</h2><p>An engineering trace per order: submission, the Opus case, every status change, the result read and console actions. Kept for 60 days.</p></div><button class="btn small" type="button" id="rl-refresh">' + icon('refresh') + 'Refresh</button></div>' +
       '<div class="table-wrap"><table class="collapse"><thead><tr><th>Order</th><th>Status</th><th class="num">Events</th><th>Last event</th><th></th></tr></thead><tbody id="rl"></tbody></table></div></section></div>';
 
@@ -22,6 +23,22 @@
         '<dt>Review window</dt><dd>' + s.reviewWindowMinutes + ' minutes (REVIEW_WINDOW_MINUTES; keep equal to the Fallout Desk Review step timeout)</dd>' +
         '</dl><p class="small muted" style="margin-top:12px">Full identifiers are in the internal deployment notes and in each run log download, not on screen.</p>';
     }).catch(function (e) { document.getElementById('dep').innerHTML = '<div class="alert bad">' + esc(e.message) + '</div>'; });
+
+    CA.api('GET', '/api/webhook-log').then(function (w) {
+      var url = location.origin + w.path;
+      var rows = w.calls.map(function (c) {
+        return '<tr><td class="nowrap">' + esc(CA.shortDate(c.at)) + '</td><td>' + (c.accepted ? '<span class="pill ok">Accepted</span>' : '<span class="pill bad">Refused</span>') + '</td><td>' + esc(c.reason || '') + (c.execution ? '<span class="sub mono">' + esc(c.execution) + '</span>' : '') + '</td><td class="small muted">' + esc((c.headers || []).join(', ')) + '</td></tr>';
+      }).join('');
+      document.getElementById('wh').innerHTML = '<dl class="kv" style="margin-bottom:14px">' +
+        '<dt>Webhook URL</dt><dd><span class="code-chip" style="white-space:normal;overflow-wrap:anywhere">' + esc(url) + '</span> <button class="btn small" type="button" id="wh-copy">Copy</button></dd>' +
+        '<dt>Custom header</dt><dd><span class="code-chip">' + esc(w.header) + '</span> with the value of OPUS_WEBHOOK_SECRET</dd>' +
+        '<dt>Secret</dt><dd>' + (w.secretSet ? '<span class="pill ok">Set</span>' : '<span class="pill warn">Not set — calls are refused</span>') + '</dd>' +
+        '<dt>Storage</dt><dd>' + (w.storage === 'redis' ? 'Redis' : '<span class="pill warn">In memory</span> tasks can land on a different server instance and be lost; connect Redis') + '</dd></dl>' +
+        '<h3 class="section-title">Last calls from Opus</h3>' +
+        (rows ? '<div class="table-wrap"><table><thead><tr><th>Time</th><th>Result</th><th>Detail</th><th>Header names</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="small muted">No calls yet.</p>');
+      var b = document.getElementById('wh-copy');
+      if (b) b.addEventListener('click', function () { (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(function () { CA.toast('Copied.'); }, function () { CA.toast('Copy is blocked in this browser.', 'warn'); }); });
+    }).catch(function (e) { document.getElementById('wh').innerHTML = '<div class="alert bad">' + esc(e.message) + '</div>'; });
 
     function loadRuns() {
       CA.api('GET', '/api/runlogs').then(function (d) {

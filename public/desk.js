@@ -55,11 +55,11 @@
       document.getElementById('open').innerHTML = list.length ? list.map(function (o) {
         var waiting = o.stage === 'with_desk';
         return '<tr class="clickable" data-id="' + esc(o.id) + '"><td data-h="Order" class="id-cell"><a href="/order.html?id=' + encodeURIComponent(o.id) + '"><strong>' + esc(o.orderId) + '</strong></a><span class="sub">' + esc(o.customer) + ' · ' + esc(o.planName) + '</span></td>' +
-          '<td data-h="Package">' + (waiting ? '<span class="muted">Shown after review</span>' : esc((o.heldPackages || []).map(function (p) { return PKG[p] || p; }).join(', ') || '—')) + '<span class="sub">' + esc(CA.QUEUES[o.reviewQueue] || '') + '</span></td>' +
+          '<td data-h="Package">' + (waiting && !(o.heldPackages || []).length ? '<span class="muted">' + (o.reviewOpen ? 'Ready to decide' : 'Shown after review') + '</span>' : esc((o.heldPackages || []).map(function (p) { return PKG[p] || p; }).join(', ') || '—')) + '<span class="sub">' + esc(CA.QUEUES[o.reviewQueue] || '') + '</span></td>' +
           '<td data-h="Error">' + (o.errorCode ? '<span class="code-chip">' + esc(o.errorCode) + '</span><span class="sub">' + esc(o.errorText) + '</span>' : '—') + '</td>' +
           '<td data-h="Why">' + esc(CA.REASONS[o.escalationReason] || (waiting ? '—' : CA.words(o.escalationReason) || '—')) + '</td>' +
           '<td class="num" data-h="Attempts">' + (o.stage === 'held' ? esc(String(attempts(o))) : '—') + '</td>' +
-          '<td>' + CA.pill(o) + '<span class="sub">held ' + esc(CA.ago(o.waitingSince || o.finishedAt || o.submittedAt)) + '</span></td></tr>';
+          '<td>' + (o.reviewOpen ? '<span class="pill info">Ready to decide</span>' : CA.pill(o)) + '<span class="sub">held ' + esc(CA.ago(o.waitingSince || o.finishedAt || o.submittedAt)) + '</span></td></tr>';
       }).join('') : '<tr><td colspan="6" class="empty"><strong>Nothing waiting</strong>Held orders appear here as soon as the workflow escalates them.</td></tr>';
 
       document.getElementById('done').innerHTML = done.length ? done.slice(0, 15).map(function (o) {
