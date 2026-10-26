@@ -30,8 +30,9 @@
         return '<tr><td class="nowrap">' + esc(CA.shortDate(c.at)) + '</td><td>' + (c.accepted ? '<span class="pill ok">Accepted</span>' : '<span class="pill bad">Refused</span>') + '</td><td>' + esc(c.reason || '') + (c.execution ? '<span class="sub mono">' + esc(c.execution) + '</span>' : '') + '</td><td class="small muted">' + esc((c.headers || []).join(', ')) + '</td></tr>';
       }).join('');
       document.getElementById('wh').innerHTML = '<dl class="kv" style="margin-bottom:14px">' +
-        '<dt>Webhook URL</dt><dd><span class="code-chip" style="white-space:normal;overflow-wrap:anywhere">' + esc(url) + '</span> <button class="btn small" type="button" id="wh-copy">Copy</button></dd>' +
-        '<dt>Custom header</dt><dd><span class="code-chip">' + esc(w.header) + '</span> with the value of OPUS_WEBHOOK_SECRET</dd>' +
+        '<dt>Webhook URL</dt><dd><span class="code-chip" style="white-space:normal;overflow-wrap:anywhere">' + esc(url) + '/&lt;OPUS_WEBHOOK_SECRET&gt;</span> <button class="btn small" type="button" id="wh-copy">Copy base</button>' +
+        '<p class="small muted" style="margin-top:4px">Add the secret at the end, or use the plain address with the custom header below. The secret is never shown here.</p></dd>' +
+        '<dt>Custom header</dt><dd><span class="code-chip">' + esc(w.header) + '</span> with the value of OPUS_WEBHOOK_SECRET (optional when the secret is in the address)</dd>' +
         '<dt>Secret</dt><dd>' + (w.secretSet ? '<span class="pill ok">Set</span>' : '<span class="pill warn">Not set — calls are refused</span>') + '</dd>' +
         '<dt>Storage</dt><dd>' + (w.storage === 'redis' ? 'Redis' : '<span class="pill warn">In memory</span> tasks can land on a different server instance and be lost; connect Redis') + '</dd></dl>' +
         '<h3 class="section-title">Last calls from Opus</h3>' +
