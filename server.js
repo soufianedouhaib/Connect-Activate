@@ -355,6 +355,7 @@ app.post('/api/orders/preview', need(), wrap(async (req, res) => {
 }));
 
 app.get('/api/orders', need(), wrap(async (req, res) => {
+  try { await relinkReviews(); } catch (e) { /* never block the list */ }
   let list = (await allOrders()).filter((o) => canSee(req.user, o));
   // Refresh a few in-flight runs on each list load so the list moves on its own.
   const active = list.filter((o) => ACTIVE_STAGES.indexOf(o.stage) >= 0).slice(0, 6);
@@ -364,6 +365,7 @@ app.get('/api/orders', need(), wrap(async (req, res) => {
 }));
 
 app.get('/api/orders/:id', need(), wrap(async (req, res) => {
+  try { await relinkReviews(); } catch (e) { /* never block the page */ }
   let o = await getOrder(req.params.id);
   if (!o || !canSee(req.user, o)) return res.status(404).json({ error: 'Order not found.' });
   o = await refresh(o, req.query.force === '1');
@@ -449,19 +451,73 @@ function fieldName(key, spec) {
   const label = (spec && (spec.display_name || spec.displayName)) || key;
   return String(label).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 }
+// Input ids of the off-platform "Fallout Desk Review" node, used when Opus sends no display name.
+const KNOWN_INPUTS = { workflow_input_nvt4xa64h: 'order_state', workflow_input_3t25o528j: 'hold_ctx' };
 function unwrapInputs(inputs) {
   const out = {};
-  Object.keys(inputs || {}).forEach((k) => {
-    const v = inputs[k];
+  const src = Array.isArray(inputs) ? inputs.reduce((m, v, i) => { m[(v && (v.variable_name || v.id)) || ('input_' + i)] = v; return m; }, {}) : (inputs || {});
+  Object.keys(src).forEach((k) => {
+    const v = src[k];
     let val = v && typeof v === 'object' && 'value' in v ? v.value : v;
     if (typeof val === 'string' && /^[\[{]/.test(val.trim())) { try { val = JSON.parse(val); } catch (e) { /* keep text */ } }
-    out[fieldName(k, v && typeof v === 'object' ? v : null)] = val;
+    const hasLabel = v && typeof v === 'object' && (v.display_name || v.displayName);
+    const name = hasLabel ? fieldName(k, v) : (KNOWN_INPUTS[k] || KNOWN_INPUTS[(v && v.variable_name) || ''] || fieldName(k, null));
+    out[name] = val;
   });
   return out;
+}
+// The order number can sit anywhere in the task; look for an order_id (or an ORB- number) at any depth.
+function findOrderId(x, depth) {
+  if (depth > 6 || x == null) return '';
+  if (typeof x === 'string') { const m = x.match(/ORB-\d{4}-\d{4,}/); return m ? m[0] : ''; }
+  if (typeof x !== 'object') return '';
+  if (typeof x.order_id === 'string' && x.order_id) return x.order_id;
+  for (const k of Object.keys(x)) { const f = findOrderId(x[k], depth + 1); if (f) return f; }
+  return '';
 }
 
 // The secret can come in the X-Webhook-Secret header or as the last part of the URL
 // (/api/opus/webhook/<secret>) for setups that cannot send custom headers.
+// Keys and types only (never values) — lets support see how Opus shaped a task.
+function describeShape(x, depth) {
+  depth = depth || 0;
+  if (x == null || typeof x !== 'object' || depth > 3) return typeof x;
+  if (Array.isArray(x)) return ['array', x.length ? describeShape(x[0], depth + 1) : 'empty'];
+  const o = {};
+  Object.keys(x).slice(0, 30).forEach((k) => { o[k] = describeShape(x[k], depth + 1); });
+  return o;
+}
+// Tasks that arrived before their order could be matched: re-read the order number and attach them.
+async function relinkReviews() {
+  const all = await store.hgetall(REVIEWS_KEY);
+  const orphans = Object.keys(all || {}).filter((k) => k.indexOf('X-') === 0);
+  if (!orphans.length) return 0;
+  const orders = await allOrders();
+  let linked = 0;
+  for (const k of orphans) {
+    const r = parse(all[k]);
+    if (!r || r.status !== 'open') continue;
+    const id = r.orderId || findOrderId(r.inputs, 0);
+    let o = id ? (orders.find((x) => x.record && x.record.order_id === id && ACTIVE_STAGES.indexOf(x.stage) >= 0) || orders.find((x) => x.record && x.record.order_id === id)) : null;
+    // Last resort: exactly one order in progress and no task of its own yet.
+    if (!o) {
+      const waiting = orders.filter((x) => ACTIVE_STAGES.indexOf(x.stage) >= 0 && !x.review);
+      if (waiting.length === 1) o = waiting[0];
+    }
+    if (!o || (o.review && o.review.status === 'open')) continue;
+    const cb = await store.hget(REVIEW_SECRET_KEY, k);
+    r.orderId = o.record.order_id; r.unmatched = false; r.linkedLater = true;
+    await store.hset(REVIEWS_KEY, o.id, JSON.stringify(r));
+    if (cb) await store.hset(REVIEW_SECRET_KEY, o.id, cb);
+    await store.hdel(REVIEWS_KEY, k); await store.hdel(REVIEW_SECRET_KEY, k);
+    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || r.receivedAt; await saveOrder(o); }
+    await runlog(o.id, 'opus', 'info', 'Fallout Desk task linked to this order', { execution: r.executionId, by: id ? 'order number' : 'only order in progress' });
+    await webhookLog({ accepted: true, reason: 'Linked earlier task to order ' + o.record.order_id, execution: mask(r.executionId, 4, 4) });
+    linked++;
+  }
+  return linked;
+}
+
 app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) => {
   const headerNames = Object.keys(req.headers).filter((h) => /^x-|^authorization$/.test(h));
   if (!WEBHOOK_SECRET) {
@@ -483,7 +539,7 @@ app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) 
     return res.status(400).json({ error: 'Callback URL not allowed.' });
   }
   const inputs = unwrapInputs(b.inputs);
-  const orderId = (inputs.hold_ctx && inputs.hold_ctx.order_id) || (inputs.order_state && inputs.order_state.order_id) || '';
+  const orderId = (inputs.hold_ctx && inputs.hold_ctx.order_id) || (inputs.order_state && inputs.order_state.order_id) || findOrderId(b.inputs, 0) || findOrderId(b, 0);
   // Match the newest console run of this order that is still in progress.
   const orders = await allOrders();
   const o = orders.find((x) => x.record && x.record.order_id === orderId && ACTIVE_STAGES.indexOf(x.stage) >= 0)
@@ -491,6 +547,7 @@ app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) 
   const key = o ? o.id : 'X-' + b.execution_id;
   const review = {
     status: 'open', receivedAt: now(), executionId: b.execution_id, workflowId: b.workflow_id || null,
+    inputShape: describeShape(b.inputs),
     orderId, inputs, outputs: Object.keys(b.expected_output_schema || {}).map((k) => fieldName(k, b.expected_output_schema[k])),
     schema: b.expected_output_schema || null, unmatched: !o
   };
@@ -575,6 +632,14 @@ app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) 
   await runlog(o.id, 'opus', 'info', 'Decision sent to Opus and accepted', meta);
   o.review = review;
   res.json({ order: toDetail(await refresh(o, true)) });
+}));
+
+app.get('/api/reviews-unmatched', need('admin'), wrap(async (req, res) => {
+  const all = await store.hgetall(REVIEWS_KEY);
+  res.json({ tasks: Object.keys(all || {}).filter((k) => k.indexOf('X-') === 0).map((k) => {
+    const r = parse(all[k]) || {};
+    return { key: mask(k, 6, 4), receivedAt: r.receivedAt, status: r.status, orderId: r.orderId || '', inputKeys: Object.keys(r.inputs || {}), inputShape: r.inputShape || null, outputs: r.outputs || [] };
+  }) });
 }));
 
 app.get('/api/webhook-log', need('admin'), wrap(async (req, res) => {
