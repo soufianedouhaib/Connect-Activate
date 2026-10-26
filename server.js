@@ -120,7 +120,9 @@ async function refresh(o, force) {
   }
   o.pollError = null;
   o.opusStatus = st.raw;
-  const stage = stageFromStatus(st.raw);
+  let stage = stageFromStatus(st.raw);
+  // Opus reports IN_PROGRESS while an off-platform step waits; an open task means the desk has it.
+  if (stage === 'running' && o.review && o.review.status === 'open') stage = 'with_desk';
   if (stage !== 'completed') {
     if (stage !== o.stage) {
       await runlog(o.id, 'opus', stage === 'failed' || stage === 'timed_out' ? 'error' : 'info',
@@ -151,6 +153,14 @@ async function refresh(o, force) {
     }
     o.finishedAt = now();
     if (o.waitingSince && !o.deskDoneAt) o.deskDoneAt = now();
+    // The run finished without a decision from the console (the review step closed): retire the task.
+    if (o.review && o.review.status === 'open') {
+      o.review.status = 'closed';
+      o.review.error = 'The review step closed in the workflow before a decision was sent from the console.';
+      await store.hset(REVIEWS_KEY, o.id, JSON.stringify(o.review));
+      await store.hdel(REVIEW_SECRET_KEY, o.id);
+      await runlog(o.id, 'opus', 'error', 'Review step closed without a console decision', {});
+    }
     await runlog(o.id, 'opus', o.stage === 'failed' ? 'error' : 'info', 'Result read: ' + o.stage,
       { path: o.path || null, order_status: o.result ? o.result.order_status : null });
   } catch (e) {
@@ -176,7 +186,7 @@ function toRow(o) {
     speed: plan.speed_tier || 0,
     techType: (rec.service || {}).tech_type || '',
     includeModem: !!rec.include_modem,
-    stage: o.stage,
+    stage: o.review && o.review.status === 'open' && ACTIVE_STAGES.indexOf(o.stage) >= 0 ? 'with_desk' : o.stage,
     opusStatus: o.opusStatus || null,
     path: o.path || null,
     activationReference: res.activation_reference || '',
