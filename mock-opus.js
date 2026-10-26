@@ -8,7 +8,20 @@
  *   node mock-opus.js            (port 4100, base http://localhost:4100/v1)
  *   MOCK_WAIT_MS   how long a held order waits "with the Fallout Desk" (default 6000)
  *   MOCK_FILTER_CLOSED=1  return only the keys the Output node's order_state schema lists
+ *   MOCK_WEBHOOK_URL      off-platform review: post held orders' review task here
+ *                         (with header X-Webhook-Secret: MOCK_WEBHOOK_SECRET) and wait for the callback
+ *   MOCK_FULL_INPUTS=1    send the full hold context; default sends only what the review
+ *                         step's input schemas keep (order_id), as Opus would
  */
+const crypto = require('crypto');
+const REVIEW_SCHEMA = {
+  reviewer_note: { type: 'str', variable_name: 'reviewer_note', is_nullable: false },
+  corrected_payload: { type: 'object', variable_name: 'corrected_payload', is_nullable: true },
+  hold_ctx: { type: 'object', variable_name: 'hold_ctx', is_nullable: false },
+  r_reprocess: { type: 'bool', variable_name: 'r_reprocess', is_nullable: false },
+  r_cancel_package: { type: 'bool', variable_name: 'r_cancel_package', is_nullable: false },
+  r_cancel_order: { type: 'bool', variable_name: 'r_cancel_order', is_nullable: false }
+};
 const express = require('express');
 
 const CATEGORY_BY_PREFIX = { BIL: 'BILLING', LOG: 'LOGISTICS', PRV: 'PROVISIONING' };
@@ -98,6 +111,7 @@ function createMock() {
   let seq = 1000;
   const WAIT = Number(process.env.MOCK_WAIT_MS || 6000);
   app.use((req, res, next) => {
+    if (req.path.indexOf('/v1/execution/callback/') === 0) return next();
     if (req.headers['x-service-key'] !== (process.env.MOCK_KEY || 'test-key')) return res.status(401).json({ message: 'Invalid service key' });
     next();
   });
@@ -120,12 +134,53 @@ function createMock() {
     c.out = runWorkflow(rec);
     res.status(201).json({ success: true, caseId: c.id, message: 'Job execution started' });
   });
+  const executions = new Map();
+  function dispatch(c) {
+    if (c.dispatched) return;
+    c.dispatched = true;
+    const os = c.out.order_state;
+    const full = { order_id: os.order_id, held_packages: os.held_packages, completed_packages: os.completed_packages, primary_error_code: os.primary_error_code,
+      escalation_reason: os.escalation_reason, primary_queue: os.review_queue, attempts_made: os.attempts_made, escalated_fallout_ids: os.escalated_fallout_ids };
+    const holdCtx = process.env.MOCK_FULL_INPUTS === '1' ? full : { order_id: os.order_id };
+    const exec = crypto.randomUUID();
+    c.exec = { id: exec, token: crypto.randomBytes(24).toString('base64url'), decided: null };
+    executions.set(exec, c);
+    const self = 'http://localhost:' + (process.env.MOCK_PORT || 4100);
+    const body = {
+      execution_id: exec, workflow_id: c.workflowId, workflow_name: 'Connect and Activate - Order to Activation Orchestrator',
+      inputs: {
+        order_state: { type: 'object', display_name: 'Order State', variable_name: 'order_state', value: process.env.MOCK_FULL_INPUTS === '1' ? { status: 'HELD' } : {} },
+        hold_ctx: { type: 'object', display_name: 'Hold Ctx', variable_name: 'hold_ctx', value: holdCtx }
+      },
+      callback: { url: self + '/v1/execution/callback/' + exec, token: c.exec.token, token_header: 'X-Opus-Callback-Token' },
+      expected_output_schema: REVIEW_SCHEMA
+    };
+    fetch(process.env.MOCK_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': process.env.MOCK_WEBHOOK_SECRET || '' }, body: JSON.stringify(body) })
+      .then((r) => { c.dispatchStatus = r.status; }).catch((e) => { c.dispatchStatus = 'ERR ' + e.message; });
+  }
+  app.post('/v1/execution/callback/:exec', (req, res) => {
+    const c = executions.get(req.params.exec);
+    if (!c) return res.status(404).json({ message: 'No execution' });
+    if (c.exec.decided || req.headers['x-opus-callback-token'] !== c.exec.token) return res.status(401).json({ message: 'Invalid or used token' });
+    const out = (req.body || {}).output_data || {};
+    const extra = Object.keys(out).filter((k) => !REVIEW_SCHEMA[k]);
+    if (extra.length) return res.status(422).json({ message: 'Undeclared output fields', sent: Object.keys(out), expected: Object.keys(REVIEW_SCHEMA) });
+    if (Object.keys(out).some((k) => out[k] && typeof out[k] === 'object' && 'value' in out[k] && 'type' in out[k])) c.wrapped = true;
+    c.exec.decided = Date.now(); c.exec.output = out;
+    res.json({ ok: true });
+  });
+  app.executions = executions;
   function statusOf(c) {
     if (!c.started) return 'PENDING';
     const t = Date.now() - c.started;
     if (t < 800) return 'PENDING';
     if (t < 2500) return 'IN_PROGRESS';
     if (c.fail) return 'FAILED';
+    if (c.out.held && process.env.MOCK_WEBHOOK_URL) {
+      dispatch(c);
+      if (!c.exec.decided) return 'WAITING';
+      return Date.now() - c.exec.decided < 1200 ? 'IN_PROGRESS' : 'COMPLETED';
+    }
     if (c.out.held && t < 2500 + WAIT) return 'WAITING';
     if (c.out.held && t < 3500 + WAIT) return 'IN_PROGRESS';
     return 'COMPLETED';

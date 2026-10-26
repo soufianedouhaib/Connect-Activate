@@ -24,6 +24,14 @@ const POLL_MS = 3000;
 // Keep this equal to that step's timeout so the console never promises more time.
 const REVIEW_WINDOW_MINUTES = Number(process.env.REVIEW_WINDOW_MINUTES || 10);
 const OPUS_APP_URL = process.env.OPUS_REVIEW_URL || 'https://app.opus.com';
+// Off-platform Fallout Desk Review: Opus posts the task to /api/opus/webhook with
+// this header (set the same value in the node's Custom headers), then waits for
+// the console to post the decision to the callback URL it supplied.
+const WEBHOOK_HEADER = 'x-webhook-secret';
+const WEBHOOK_SECRET = process.env.OPUS_WEBHOOK_SECRET || '';
+const REVIEWS_KEY = 'ca:reviews';          // run id -> public review summary (no token)
+const REVIEW_SECRET_KEY = 'ca:review-cb';  // run id -> callback { url, token, token_header }
+const WEBHOOK_LOG = 'ca:webhook-log';
 
 /* ------------------------------------------------------------------ helpers */
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -63,16 +71,26 @@ async function runlog(id, source, level, message, detail) {
 }
 
 /* ------------------------------------------------------------------ orders */
+function parse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
 async function getOrder(id) {
   const s = await store.hget(ORDERS_KEY, id);
   if (!s) return null;
-  try { return JSON.parse(s); } catch (e) { return null; }
+  const o = parse(s);
+  if (o) o.review = parse(await store.hget(REVIEWS_KEY, id));
+  return o;
 }
-async function saveOrder(o) { o.updatedAt = now(); await store.hset(ORDERS_KEY, o.id, JSON.stringify(o)); return o; }
+async function saveOrder(o) {
+  o.updatedAt = now();
+  const copy = Object.assign({}, o); delete copy.review; // reviews live in their own key
+  await store.hset(ORDERS_KEY, o.id, JSON.stringify(copy));
+  return o;
+}
 async function allOrders() {
   const all = await store.hgetall(ORDERS_KEY);
-  return Object.values(all || {}).map((s) => { try { return JSON.parse(s); } catch (e) { return null; } })
-    .filter(Boolean).sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
+  const reviews = await store.hgetall(REVIEWS_KEY);
+  return Object.values(all || {}).map(parse).filter(Boolean)
+    .map((o) => { o.review = reviews && reviews[o.id] ? parse(reviews[o.id]) : null; return o; })
+    .sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 }
 function canSee(u, o) { return u.role !== 'coordinator' || o.submittedBy === u.id; }
 
@@ -147,7 +165,7 @@ function toRow(o) {
   const rec = o.record || {};
   const cust = rec.customer || {};
   const plan = rec.plan || {};
-  const res = o.result || {};
+  const res = o.result || reviewFacts(o.review) || {};
   return {
     id: o.id,
     orderId: rec.order_id,
@@ -178,7 +196,27 @@ function toRow(o) {
     finishedAt: o.finishedAt || null,
     waitingSince: o.waitingSince || null,
     failure: o.failure || null,
-    pollError: o.pollError || null
+    pollError: o.pollError || null,
+    reviewOpen: !!(o.review && o.review.status === 'open')
+  };
+}
+
+/* What the Fallout Desk Review step received, shaped like the held output so the
+   same screens can show it while the order waits. Only keys Opus passed through. */
+function reviewFacts(r) {
+  if (!r || !r.inputs) return null;
+  const hc = (r.inputs.hold_ctx && typeof r.inputs.hold_ctx === 'object') ? r.inputs.hold_ctx : {};
+  const os = (r.inputs.order_state && typeof r.inputs.order_state === 'object') ? r.inputs.order_state : {};
+  return {
+    order_id: hc.order_id || os.order_id || '',
+    held_packages: hc.held_packages || [],
+    completed_packages: hc.completed_packages || [],
+    primary_error_code: hc.primary_error_code || '',
+    escalation_reason: hc.escalation_reason || '',
+    review_queue: hc.primary_queue || hc.alerted_team || '',
+    attempts_made: hc.attempts_made == null ? null : hc.attempts_made,
+    escalated_fallout_ids: hc.escalated_fallout_ids || [],
+    hold_reasons: hc.hold_reasons || os.hold_reasons || []
   };
 }
 
@@ -190,7 +228,12 @@ function toDetail(o) {
     deskDoneAt: o.deskDoneAt || null,
     reprocessedAs: o.reprocessedAs || null,
     lastPolled: o.lastPolled || null,
-    reviewWindowMinutes: REVIEW_WINDOW_MINUTES
+    reviewWindowMinutes: REVIEW_WINDOW_MINUTES,
+    review: o.review ? {
+      status: o.review.status, receivedAt: o.review.receivedAt, sentAt: o.review.sentAt || null,
+      error: o.review.error || null, outputs: o.review.outputs || [], inputs: o.review.inputs || {},
+      facts: reviewFacts(o.review)
+    } : null
   });
 }
 
@@ -224,13 +267,14 @@ app.post('/api/logout', (req, res) => { auth.clearSession(res); res.json({ ok: t
 /* ------------------------------------------------------------------ signed in */
 app.get('/api/me', need(), wrap(async (req, res) => {
   const orders = await allOrders();
-  const deskCount = orders.filter((o) => o.stage === 'with_desk' || (o.stage === 'held' && !o.resolution)).length;
+  const deskCount = orders.filter((o) => (o.review && o.review.status === 'open') || o.stage === 'with_desk' || (o.stage === 'held' && !o.resolution)).length;
   res.json({
     user: auth.publicUser(req.user),
     opusConnected: opus.missingEnv().length === 0,
     storage: store.kind,
     reviewWindowMinutes: REVIEW_WINDOW_MINUTES,
     opusReviewUrl: OPUS_APP_URL,
+    webhookMode: !!WEBHOOK_SECRET,
     deskCount: req.user.role === 'coordinator' ? 0 : deskCount
   });
 }));
@@ -373,8 +417,161 @@ app.delete('/api/orders/:id', need('admin'), wrap(async (req, res) => {
 
 app.post('/api/orders-clear', need('admin'), wrap(async (req, res) => {
   const all = await allOrders();
-  for (const o of all) await store.hdel(ORDERS_KEY, o.id);
+  for (const o of all) { await store.hdel(ORDERS_KEY, o.id); await store.hdel(REVIEWS_KEY, o.id); await store.hdel(REVIEW_SECRET_KEY, o.id); }
   res.json({ ok: true, removed: all.length });
+}));
+
+/* ------------------------------------------------------------------ Fallout Desk webhook
+ * Opus "Off-Platform Task" contract:
+ *   Opus  -> POST /api/opus/webhook  { execution_id, workflow_id, inputs, callback{url,token,token_header}, expected_output_schema }
+ *   we    -> 200 straight away (Opus retries 5xx; any other 4xx fails the step)
+ *   later -> POST callback.url with header <token_header>: <token> and { output_data: {...bare values}, status: 'success' }
+ * The callback token is single-use and never leaves the server.
+ */
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || ''));
+  return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
+}
+function callbackAllowed(u) {
+  try {
+    const x = new URL(u);
+    const base = opus.base() ? new URL(opus.base()) : null;
+    if (base && x.origin === base.origin) return true;
+    return x.protocol === 'https:' && (x.hostname === 'opus.com' || x.hostname.endsWith('.opus.com'));
+  } catch (e) { return false; }
+}
+async function webhookLog(entry) {
+  try { await store.push(WEBHOOK_LOG, JSON.stringify(Object.assign({ at: now() }, entry)), 50, 30 * 24 * 3600); } catch (e) { /* never break the webhook */ }
+}
+function unwrapInputs(inputs) {
+  const out = {};
+  Object.keys(inputs || {}).forEach((k) => {
+    const v = inputs[k];
+    let val = v && typeof v === 'object' && 'value' in v ? v.value : v;
+    if (typeof val === 'string' && /^[\[{]/.test(val.trim())) { try { val = JSON.parse(val); } catch (e) { /* keep text */ } }
+    out[k] = val;
+  });
+  return out;
+}
+
+app.post('/api/opus/webhook', wrap(async (req, res) => {
+  const headerNames = Object.keys(req.headers).filter((h) => /^x-|^authorization$/.test(h));
+  if (!WEBHOOK_SECRET) {
+    await webhookLog({ accepted: false, reason: 'Webhook secret not set on the console', headers: headerNames });
+    return res.status(503).json({ error: 'Webhook not configured.' });
+  }
+  if (!sameSecret(req.headers[WEBHOOK_HEADER], WEBHOOK_SECRET)) {
+    await webhookLog({ accepted: false, reason: 'Missing or wrong ' + WEBHOOK_HEADER + ' header', headers: headerNames });
+    return res.status(401).json({ error: 'Not authorised.' });
+  }
+  const b = req.body || {};
+  const cb = b.callback || {};
+  if (!b.execution_id || !cb.url || !cb.token) {
+    await webhookLog({ accepted: false, reason: 'Body has no execution_id or callback', headers: headerNames });
+    return res.status(400).json({ error: 'execution_id and callback are required.' });
+  }
+  if (!callbackAllowed(cb.url)) {
+    await webhookLog({ accepted: false, reason: 'Callback address is not an Opus address', execution: mask(b.execution_id, 4, 4) });
+    return res.status(400).json({ error: 'Callback URL not allowed.' });
+  }
+  const inputs = unwrapInputs(b.inputs);
+  const orderId = (inputs.hold_ctx && inputs.hold_ctx.order_id) || (inputs.order_state && inputs.order_state.order_id) || '';
+  // Match the newest console run of this order that is still in progress.
+  const orders = await allOrders();
+  const o = orders.find((x) => x.record && x.record.order_id === orderId && ACTIVE_STAGES.indexOf(x.stage) >= 0)
+    || orders.find((x) => x.record && x.record.order_id === orderId);
+  const key = o ? o.id : 'X-' + b.execution_id;
+  const review = {
+    status: 'open', receivedAt: now(), executionId: b.execution_id, workflowId: b.workflow_id || null,
+    orderId, inputs, outputs: Object.keys(b.expected_output_schema || {}),
+    schema: b.expected_output_schema || null, unmatched: !o
+  };
+  await store.hset(REVIEW_SECRET_KEY, key, JSON.stringify({ url: cb.url, token: cb.token, token_header: cb.token_header || 'X-Opus-Callback-Token' }));
+  await store.hset(REVIEWS_KEY, key, JSON.stringify(review));
+  await webhookLog({ accepted: true, reason: o ? 'Matched order ' + orderId : 'No console order for ' + (orderId || 'this task'), execution: mask(b.execution_id, 4, 4), headers: headerNames });
+  if (o) {
+    await runlog(o.id, 'opus', 'info', 'Fallout Desk task received from Opus', { execution: b.execution_id, outputs: review.outputs, inputs: Object.keys(inputs) });
+    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || now(); await saveOrder(o); }
+  }
+  res.json({ received: true });
+}));
+
+/* Build output_data from what the step declared, so Opus never gets an undeclared key (422). */
+function buildOutputs(review, decision, note, corrected) {
+  const routes = { r_reprocess: decision === 'reprocess', r_cancel_package: decision === 'cancel_package', r_cancel_order: decision === 'cancel_order' };
+  const values = Object.assign({
+    reviewer_note: note,
+    corrected_payload: corrected || null,
+    hold_ctx: review.inputs.hold_ctx == null ? null : review.inputs.hold_ctx
+  }, routes);
+  const declared = review.schema ? Object.keys(review.schema) : Object.keys(values);
+  const out = {};
+  declared.forEach((k) => {
+    if (k in values) {
+      const spec = (review.schema || {})[k] || {};
+      // A non-nullable object with nothing to send gets an empty object rather than null.
+      out[k] = values[k] === null && spec.is_nullable === false && /object/.test(spec.type || '') ? {} : values[k];
+    } else {
+      const spec = review.schema[k] || {};
+      out[k] = spec.is_nullable === false ? (/bool/.test(spec.type || '') ? false : /object/.test(spec.type || '') ? {} : /float|int/.test(spec.type || '') ? 0 : '') : null;
+    }
+  });
+  return out;
+}
+
+app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) => {
+  const o = await getOrder(req.params.id);
+  if (!o) return res.status(404).json({ error: 'Order not found.' });
+  const review = o.review;
+  if (!review || review.status !== 'open') return res.status(400).json({ error: 'There is no open Fallout Desk task from Opus for this order.' });
+  const b = req.body || {};
+  const d = String(b.decision || '');
+  const note = String(b.note || '').trim().slice(0, 4000);
+  if (!DECISIONS[d]) return res.status(400).json({ error: 'Choose one resolution.' });
+  if (note.length < 5) return res.status(400).json({ error: 'Add a short reviewer note.' });
+  let corrected = null;
+  if (b.correctedText && String(b.correctedText).trim()) {
+    try { corrected = JSON.parse(b.correctedText); } catch (e) { return res.status(400).json({ error: 'The corrected details are not valid JSON: ' + e.message }); }
+    if (!corrected || typeof corrected !== 'object' || Array.isArray(corrected)) return res.status(400).json({ error: 'The corrected details must be a JSON object.' });
+  }
+  const cb = parse(await store.hget(REVIEW_SECRET_KEY, o.id));
+  if (!cb) return res.status(400).json({ error: 'The callback for this task is missing, so the decision cannot be sent.' });
+  const output = buildOutputs(review, d, note, corrected);
+  let r, text = '';
+  try {
+    r = await fetch(cb.url, { method: 'POST', headers: { 'Content-Type': 'application/json', [cb.token_header]: cb.token }, body: JSON.stringify({ output_data: output, status: 'success' }) });
+    text = await r.text();
+  } catch (e) {
+    await runlog(o.id, 'opus', 'error', 'Sending the decision to Opus failed', { error: e.message });
+    return res.status(502).json({ error: 'Could not reach Opus to send the decision. Try again in a moment.' });
+  }
+  const meta = { decision: d, by: req.user.name, status: r.status, keys: Object.keys(output) };
+  if (r.status === 422) {
+    await runlog(o.id, 'opus', 'error', 'Opus refused the decision fields', Object.assign(meta, { answer: text.slice(0, 400) }));
+    return res.status(422).json({ error: 'Opus refused the fields sent (' + text.slice(0, 300) + '). Nothing was stored; the task is still open.' });
+  }
+  if (!r.ok) {
+    const closed = r.status === 401 || r.status === 404;
+    review.status = closed ? 'closed' : 'open';
+    review.error = closed ? 'Opus no longer accepts a decision for this task (it was already answered or has closed).' : 'Opus answered ' + r.status + '.';
+    await store.hset(REVIEWS_KEY, o.id, JSON.stringify(review));
+    if (closed) await store.hdel(REVIEW_SECRET_KEY, o.id);
+    await runlog(o.id, 'opus', 'error', 'Decision not accepted by Opus', Object.assign(meta, { answer: text.slice(0, 400) }));
+    return res.status(409).json({ error: review.error });
+  }
+  review.status = 'sent'; review.sentAt = now(); review.error = null;
+  await store.hset(REVIEWS_KEY, o.id, JSON.stringify(review));
+  await store.hdel(REVIEW_SECRET_KEY, o.id); // single-use
+  o.resolution = { decision: d, label: DECISIONS[d], note, by: req.user.name, byId: req.user.id, at: now(), sentToOpus: true, corrected: !!corrected };
+  await saveOrder(o);
+  await runlog(o.id, 'opus', 'info', 'Decision sent to Opus and accepted', meta);
+  o.review = review;
+  res.json({ order: toDetail(await refresh(o, true)) });
+}));
+
+app.get('/api/webhook-log', need('admin'), wrap(async (req, res) => {
+  const list = (await store.list(WEBHOOK_LOG)).map(parse).filter(Boolean).reverse();
+  res.json({ calls: list.slice(0, 20), secretSet: !!WEBHOOK_SECRET, header: 'X-Webhook-Secret', path: '/api/opus/webhook', storage: store.kind });
 }));
 
 /* ------------------------------------------------------------------ reports */
@@ -484,7 +681,8 @@ app.get('/api/system', need('admin'), wrap(async (req, res) => {
     storage: store.kind,
     sessionSecretSet: !auth.secretIsEphemeral,
     demoSignIn: auth.demoSignInEnabled(),
-    reviewWindowMinutes: REVIEW_WINDOW_MINUTES
+    reviewWindowMinutes: REVIEW_WINDOW_MINUTES,
+    webhookSecretSet: !!WEBHOOK_SECRET
   });
 }));
 
