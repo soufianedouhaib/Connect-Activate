@@ -109,10 +109,10 @@
         var ok = o.stage === 'activated';
         var rec2 = fixes(o).filter(function (f) { return f.recovered; });
         var healed = rec2.length ? '<div class="alert ok" style="margin-top:16px"><strong>Recovered without a person</strong>' + rec2.map(function (f) {
-          return esc(CA.nb(PKG_LABEL[f.package] + ' failed with ' + f.errorCode + ' on attempt ' + f.attempt + '. ' + f.summary));
+          return esc(CA.nb(PKG_LABEL[f.package] + ' failed with ' + f.errorCode + ' on ' + (f.when || 'attempt ' + f.attempt) + '. ' + f.summary));
         }).join('<br>') + '</div>' : '';
         return '<section class="card"><div class="result-hero ' + (ok ? 'ok' : 'bad') + '"><div class="mark">' + icon(ok ? 'checkCircle' : 'alert') + '</div><div>' +
-          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (rec2.length ? 'Every package completed after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
+          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (o.droppedPackage === 'LOGISTICS' ? 'Billing and network activation completed, final validation passed and the order is closed. The modem shipment was dropped at the Fallout Desk, so no modem is sent.' : rec2.length ? 'Every package completed after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
           '<div class="tiles">' +
           tile('Activation reference', res.activation_reference || 'Not returned') +
           tile('Plan', (res.plan_name || (rec.plan || {}).name || '—')) +
@@ -123,14 +123,15 @@
       if (o.stage === 'held' && o.category === 'cancelled') {
         return '<section class="card"><div class="result-hero bad"><div class="mark">' + icon('x') + '</div><div>' +
           '<h2>Order cancelled</h2><p>' + esc(joinNames(res.held_packages) || 'A package') + ' could not be completed' + (res.primary_error_code ? ' (' + CA.nb(res.primary_error_code) + ')' : '') + ', and the Fallout Desk cancelled the order' + (o.resolution ? ' on ' + esc(CA.fmtDate(o.resolution.at, true)) : '') + '.</p></div></div>' +
-          holdTiles(o, res) +
-          message(res.customer_message, res.customer_channel || (rec.customer || {}).preferred_channel, 'Customer notice', rec) +
-          '<p class="small muted" style="margin-top:8px">The workflow sends this same notice whatever the desk decides.</p></section>';
+          holdTiles(o, res) + cancelNoticeBlock(o.cancelNotice, o) +
+          (res.customer_message ? '<details class="table-view" style="margin-top:14px"><summary>Notice the workflow drafted</summary>' +
+            '<p class="small muted" style="margin:8px 0 0">The workflow drafts this delay notice whatever the desk decides, so it does not mention the cancellation. Send the cancellation notice above instead.</p>' +
+            message(res.customer_message, res.customer_channel || (rec.customer || {}).preferred_channel, 'Delay notice from the workflow', rec) + '</details>' : '') + '</section>';
       }
       if (o.stage === 'held') {
-        var reasonText = res.escalation_reason === 'RETRY_LIMIT' ? 'It kept failing after ' + (res.attempts_made || 3) + ' attempts, including automatic fixes.' : res.escalation_reason === 'NO_SAFE_FIX' ? 'There is no safe automatic fix for this error, so it went straight to a person.' : '';
+        var reasonText = res.escalation_reason === 'RETRY_LIMIT' ? 'It failed all ' + (res.attempts_made || 3) + ' attempts, including the automatic fixes.' : res.escalation_reason === 'NO_SAFE_FIX' ? 'There is no safe automatic fix for this error, so it went straight to a person.' : '';
         return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('alert') + '</div><div>' +
-          '<h2>Order held</h2><p>' + esc(joinNames(res.held_packages) || 'A package') + ' could not be completed. ' + esc(reasonText) + ' The customer has been sent a delay notice.</p></div></div>' +
+          '<h2>' + (o.reprocessedAs ? ((o.resolution || {}).decision === 'cancel_package' ? 'Held · sent on without the modem' : 'Held · sent again') : 'Order held') + '</h2><p>' + esc(joinNames(res.held_packages) || 'A package') + ' could not be completed. ' + esc(reasonText) + ' The workflow drafted a delay notice for the customer.' + (o.reprocessedAs ? ' The order was then sent again; the new run is linked above.' : '') + '</p></div></div>' +
           holdTiles(o, res) +
           ((res.escalated_fallout_ids || []).length ? '<p class="small muted" style="margin-top:12px">Fallout case' + (res.escalated_fallout_ids.length > 1 ? 's' : '') + ': ' + res.escalated_fallout_ids.map(function (f) { return '<span class="code-chip">' + esc(f) + '</span>'; }).join(' ') + '</p>' : '') +
           message(res.customer_message, res.customer_channel || (rec.customer || {}).preferred_channel, 'Customer delay notice', rec) + '</section>';
@@ -144,6 +145,15 @@
 
     function tile(label, value, html, sub) {
       return '<div class="tile"><span class="t-label">' + esc(label) + '</span><span class="t-value">' + (html ? value : esc(value)) + '</span>' + (sub ? '<span class="small muted">' + esc(sub) + '</span>' : '') + '</div>';
+    }
+
+    function cancelNoticeBlock(n, o) {
+      if (!n) return '';
+      return '<div class="msg" style="margin-top:18px"><h3 class="section-title" style="margin:0">Cancellation notice</h3>' +
+        '<div class="msg-meta"><span class="tag">' + (n.channel === 'EMAIL' ? 'Email' : 'SMS') + '</span>' + (n.to ? '<span>to ' + esc(n.to) + '</span>' : '') +
+        '<button class="btn small" type="button" id="copy-cancel" style="margin-left:auto">' + icon('file') + 'Copy</button></div>' +
+        '<div class="bubble' + (n.channel === 'EMAIL' ? ' email' : '') + '" id="cancel-text">' + esc(n.text).split(esc(o.orderId)).join('<span class="nowrap">' + esc(o.orderId) + '</span>') + '<span class="count">' + n.text.length + ' characters</span></div>' +
+        '<p class="small muted" style="margin-top:6px">Written by the console from the error on this order. The workflow does not send it, so send it to the customer from your usual channel.</p></div>';
     }
 
     function message(text, channel, title, rec) {
@@ -168,7 +178,9 @@
       var running = o.stage === 'running' || o.stage === 'starting';
       var p = o.trace && o.trace.packages && o.trace.packages[type];
       var max = (rec.retry_policy && rec.retry_policy.max_attempts) || 3;
-      if (type === 'LOGISTICS' && !rec.include_modem) return { cls: 'ok', state: 'Not required', note: 'Customer keeps their own modem' };
+      if (type === 'LOGISTICS' && !rec.include_modem) return o.droppedPackage === 'LOGISTICS'
+        ? { cls: 'ok', state: 'Dropped', note: 'Cancelled at the Fallout Desk; no modem is shipped' }
+        : { cls: 'ok', state: 'Not required', note: 'Customer keeps their own modem' };
       if (running && !p) return { cls: '', state: 'In progress', note: PKG_NOTE[type] };
       if (p && p.status) {
         var lines = [];
@@ -177,11 +189,14 @@
         var first = o.firstRunPackages && o.firstRunPackages[type];
         if (first && first.reference && first.reference === p.reference) lines.push('same as the first run');
         var f = p.fallout;
-        var fix = f && f.fixes.length ? f.fixes.map(function (x) { return x.summary; }).filter(Boolean).join(' ') : '';
+        // Each distinct fix once: a retry that tried the same thing again is not a second fix.
+        var fix = f && f.fixes.length ? f.fixes.map(function (x) { return x.summary; }).filter(function (s, i, a) { return s && a.indexOf(s) === i; }).join(' ') : '';
+        var tries = f ? f.fixes.length : 0;
+        var sameEachTime = tries > 1 && fix && f.fixes.every(function (x) { return x.summary === f.fixes[0].summary; });
         if (p.status === 'COMPLETED') return { cls: 'ok', state: 'Completed', note: lines.join(' · ') || PKG_NOTE[type], fix: f && f.status === 'RESOLVED' ? (f.errorCode + ' fixed automatically. ' + fix) : '' };
         if (p.status === 'NOT_REQUIRED') return { cls: 'ok', state: 'Not required', note: PKG_NOTE[type] };
         var err = p.lastError || (f && f.errorCode) || '';
-        return { cls: 'held', state: 'Escalated', note: [err ? err + (CA.ERRORS[err] ? ' · ' + CA.ERRORS[err] : '') : ''].concat(lines).filter(Boolean).join(' · '), fix: fix ? 'Tried: ' + fix : '' };
+        return { cls: 'held', state: 'Escalated', note: [err ? err + (CA.ERRORS[err] ? ' · ' + CA.ERRORS[err] : '') : ''].concat(lines).filter(Boolean).join(' · '), fix: fix ? 'Tried' + (sameEachTime ? ' on attempts ' + f.fixes.map(function (x) { return x.attempt; }).join(' and ') : '') + ': ' + fix : '' };
       }
       if (o.stage === 'activated' || o.stage === 'validation_gap') return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
       if (o.stage === 'held' || o.stage === 'with_desk') {
@@ -213,7 +228,10 @@
       if (fx.length) {
         var recovered = fx.filter(function (f) { return f.recovered; });
         steps.push(stage(recovered.length === fx.length ? 'done' : 'held', 'refresh', recovered.length === fx.length ? 'Fixed automatically' : 'Automatic fixes tried',
-          fx.map(function (f) { return esc(CA.nb(PKG_LABEL[f.package] + ', attempt ' + f.attempt + ': ' + f.summary + (f.recovered ? ' The next attempt succeeded.' : ''))); }).join('<br>')));
+          fx.map(function (f) {
+            var when = f.when || ('attempt ' + f.attempt);
+            return esc(CA.nb(PKG_LABEL[f.package] + ', ' + when + ': ' + f.summary + (f.repeated ? ' Same result each time.' : '') + (f.recovered ? ' The next attempt succeeded.' : '')));
+          }).join('<br>')));
       }
       if (running || failed) {
         steps.push(stage('skip', 'clock', 'Results combined', ''));
@@ -230,11 +248,15 @@
         steps.push(stage('held', 'alert', 'Results combined · held', esc(names ? names + ' escalated.' : 'A package was escalated.')));
         steps.push(stage('held', 'send', 'Team alerted', esc((queue || 'The responsible queue') + ' was messaged in team chat.')));
         steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open — reprocess, cancel the package or cancel the order.') : (o.resolution ? 'Decided: ' + esc(o.resolution.label) + '.' : 'The review step closed without a decision from the console.')));
-        steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer notice', waiting ? '' : 'Delay notice sent by ' + esc(CA.channel(res.customer_channel)) + '.'));
         var dec = o.resolution && o.resolution.decision;
+        steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer notice', waiting ? '' : dec === 'cancel_order'
+          ? 'The workflow drafted its usual delay notice; the console wrote the cancellation notice to send instead.'
+          : 'Delay notice drafted for ' + esc(CA.channel(res.customer_channel)) + '.'));
         if (waiting) steps.push(stage('skip', 'clock', 'Hold recorded', ''));
         else if (dec === 'cancel_order') steps.push(stage('bad', 'x', 'Order cancelled', 'The workflow records the order as held; the Fallout Desk cancelled it.'));
-        else if (dec === 'cancel_package') steps.push(stage('held', 'pause', 'Hold recorded · package cancelled', 'The failing package was cancelled; the rest of the order stays on hold.'));
+        else if (dec === 'cancel_package') steps.push(o.reprocessedAs
+          ? stage('done', 'refresh', 'Modem shipment dropped · sent on', 'The workflow records every decision as a hold, so the console started a new run without the modem. Billing and network activation finish there.')
+          : stage('held', 'pause', 'Hold recorded · package cancelled', 'The workflow records every decision as a hold. Send the order again without the modem to activate the rest.'));
         else steps.push(stage('held', 'pause', 'Hold recorded', o.reprocessedAs ? 'The order was sent again for processing.' : 'The order stays on hold until it is sent again or cancelled.'));
       }
       return '<section class="card"><div class="card-head"><div><h2>How the order moved</h2><p>The workflow\'s steps for this order' + (o.trace ? ', from the step log of this run' : '') + '.</p></div></div><div class="pipeline">' + steps.join('') + '</div></section>';
@@ -257,7 +279,7 @@
           ['LOC ID', '<span class="code-chip">' + esc(svc.loc_id) + '</span>', true], ['Technology', svc.tech_type + (svc.max_speed_tier ? ' · up to ' + svc.max_speed_tier + ' Mbps' : '')],
           ['Active service there', svc.existing_active_service ? 'Yes' : 'No'],
           ['Plan', planCell, true], ['Price', plan.monthly_price_cents ? CA.money(plan.monthly_price_cents) + ' a month' : ''],
-          ['Modem', rec.include_modem ? (modem.name || modem.sku) + ' · from ' + (modem.assigned_warehouse === 'WH-SOUTH' ? 'South' : 'North') + ' warehouse' : 'Customer keeps their own'],
+          ['Modem', rec.include_modem ? (modem.name || modem.sku) + ' · from ' + (modem.assigned_warehouse === 'WH-SOUTH' ? 'South' : 'North') + ' warehouse' : o.droppedPackage === 'LOGISTICS' ? 'None, dropped at the Fallout Desk' : 'Customer keeps their own'],
           ['Payment', CA.words(rec.payment_preference)]
         ]) + '</div></div>' +
         ((rec.fault_rules || []).length ? '<p class="small muted" style="margin-top:14px">This example carries ' + rec.fault_rules.length + ' simulated fault' + (rec.fault_rules.length > 1 ? 's' : '') + ' (' + rec.fault_rules.map(function (r) { return esc(r.error_code); }).join(', ') + ') to show how the workflow handles it.</p>' : '') +
@@ -304,9 +326,7 @@
         return head +
           '<div class="alert info" style="margin-bottom:14px"><strong>Decide here</strong>Your decision goes straight back to the workflow, which then drafts the customer notice and records the hold.</div>' +
           '<div class="choices" role="radiogroup" aria-label="Resolution">' +
-          choice('reprocess', 'Reprocess the order', 'Fix what is needed and run it again.') +
-          choice('cancel_package', 'Cancel the affected package', 'Keep the rest of the order, drop the failing part.') +
-          choice('cancel_order', 'Cancel the entire order', 'Stop the order and tell the customer.') + '</div>' +
+          choices(o) +
           '<label class="field" style="margin-top:12px"><span>Reviewer note</span><textarea id="note" placeholder="What you found and why you chose this resolution."></textarea></label>' +
           '<details id="c-more" style="margin-top:10px"><summary class="small" style="cursor:pointer;color:var(--brand-ink)">Correct the order details (optional)</summary>' +
           '<p class="hint" style="margin:8px 0 10px">Change only what caused the hold. The corrections travel with the decision and are filled in when the order is sent again.</p>' + correctionFields(o, rec) + '</details>' +
@@ -319,23 +339,29 @@
           (corr ? '<dt>Corrections</dt><dd>' + esc(corr) + '</dd>' : '') +
           '<dt>Decided by</dt><dd>' + esc(o.resolution.by) + ', ' + esc(CA.fmtDate(o.resolution.at, true)) + '</dd>' +
           (o.resolution.sentToOpus ? '<dt>Workflow</dt><dd><span class="pill ok">Accepted by the workflow</span></dd>' : '') + '</dl>' +
-          (isDesk && o.stage === 'held' && !o.reprocessedAs && o.resolution.decision !== 'cancel_order' ? '<div class="toolbar" style="margin-top:14px"><button class="btn small" type="button" id="reproc">' + icon('refresh') + 'Send again for processing</button></div>' : '') + '</section>';
+          (isDesk && o.stage === 'held' && !o.reprocessedAs && o.resolution.decision === 'cancel_package' && o.canDropPackage ? '<div class="toolbar" style="margin-top:14px"><button class="btn small primary" type="button" id="dropgo">' + icon('refresh') + 'Send on without the modem</button></div>' :
+            isDesk && o.stage === 'held' && !o.reprocessedAs && o.resolution.decision !== 'cancel_order' ? '<div class="toolbar" style="margin-top:14px"><button class="btn small" type="button" id="reproc">' + icon('refresh') + 'Send again for processing</button></div>' : '') + '</section>';
       }
       if (!isDesk) return head + '<p class="small">' + (o.stage === 'with_desk' ? 'The desk is reviewing this order now.' : 'No decision has been recorded.') + '</p></section>';
       if (o.stage === 'with_desk') return head + '<p class="small">Waiting for the review task to arrive from the workflow. It usually comes within a few seconds of the hold; the decision panel appears here when it does.</p></section>';
       // Held, and the review step closed without a decision from the console.
       return head +
         '<div class="alert warn" style="margin-bottom:12px">' + esc((rv && rv.error) || 'The review step closed before a decision was sent.') + ' Record what was decided so the order history and reports are complete.</div>' +
-        '<div class="choices" role="radiogroup" aria-label="Resolution">' +
-        choice('reprocess', 'Reprocess the order', 'Fix what is needed and run it again.') +
-        choice('cancel_package', 'Cancel the affected package', 'Keep the rest of the order, drop the failing part.') +
-        choice('cancel_order', 'Cancel the entire order', 'Stop the order and tell the customer.') + '</div>' +
+        choices(o) +
         '<label class="field" style="margin-top:12px"><span>Reviewer note</span><textarea id="note" placeholder="What you found and why you chose this resolution."></textarea></label>' +
         '<div id="d-err" class="alert bad" hidden style="margin-top:10px"></div>' +
         '<button class="btn primary block" type="button" id="record" style="margin-top:12px">Record decision</button></section>';
     }
-    function choice(v, t, s) {
-      return '<label class="choice"><input type="radio" name="decision" value="' + v + '"><div><b>' + esc(t) + '</b><span>' + esc(s) + '</span></div></label>';
+    function choices(o) {
+      return '<div class="choices" role="radiogroup" aria-label="Resolution">' +
+        choice('reprocess', 'Reprocess the order', 'Fix what is needed and run it again.') +
+        (o.canDropPackage
+          ? choice('cancel_package', 'Cancel the affected package', 'Drop the modem shipment and activate the rest. The console sends the order on without the modem.')
+          : choice('cancel_package', 'Cancel the affected package', o.dropBlocked || 'Not available for this order.', true)) +
+        choice('cancel_order', 'Cancel the entire order', 'Stop the order. The console writes the cancellation notice for the customer.') + '</div>';
+    }
+    function choice(v, t, s, off) {
+      return '<label class="choice' + (off ? ' off' : '') + '"><input type="radio" name="decision" value="' + v + '"' + (off ? ' disabled' : '') + '><div><b>' + esc(t) + '</b><span>' + esc(s) + '</span></div></label>';
     }
 
     function timelineCard(o) {
@@ -391,6 +417,17 @@
           .catch(function (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; btn.innerHTML = icon('send') + 'Send decision'; });
       });
       if ((el = document.getElementById('reproc'))) el.addEventListener('click', function () { reprocess(o); });
+      if ((el = document.getElementById('dropgo'))) el.addEventListener('click', function () {
+        var b = this; b.disabled = true;
+        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/resubmit', { dropModem: true })
+          .then(function (d) { location.href = '/order.html?id=' + encodeURIComponent(d.order.id); })
+          .catch(function (e) { b.disabled = false; CA.toast(e.message, 'bad'); });
+      });
+      if ((el = document.getElementById('copy-cancel'))) el.addEventListener('click', function () {
+        var t = o.cancelNotice.text;
+        (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { CA.toast('Cancellation notice copied.'); })
+          .catch(function () { var r = document.createRange(); r.selectNodeContents(document.getElementById('cancel-text')); var s = getSelection(); s.removeAllRanges(); s.addRange(r); CA.toast('Text selected. Press Ctrl+C to copy.'); });
+      });
       if ((el = document.getElementById('del'))) el.addEventListener('click', function () {
         var m = CA.modal('Delete this order?', '<p>' + esc(o.orderId) + ' will be removed from the console and from report totals. The run in the workflow is not affected, and its run log is kept.</p>',
           '<button class="btn" type="button" data-close>Keep it</button><button class="btn danger" type="button" id="del-yes">Delete</button>');

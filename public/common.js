@@ -128,7 +128,7 @@
           var d = row.resolution.decision;
           if (d === 'cancel_order') return '<span class="pill plain">Order cancelled</span>';
           if (d === 'reprocess' && row.reprocessedAs) return '<span class="pill info">Reprocessed</span>';
-          if (d === 'cancel_package') return '<span class="pill warn">Held · package cancelled</span>';
+          if (d === 'cancel_package') return row.reprocessedAs ? '<span class="pill info">Sent on without the modem</span>' : '<span class="pill warn">Held · package cancelled</span>';
           return '<span class="pill warn">Held · to reprocess</span>';
         }
         return '<span class="pill warn">Held</span>';
