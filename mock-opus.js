@@ -44,64 +44,103 @@ function normalise(rec) {
   };
 }
 
+// Port of the workflow's "Execute <X> Package" code: retries, applies each fix's patch,
+// keeps fix_history, and escalates on no-safe-fix or the retry limit.
 function runPackage(os, type) {
   const oid = os.order_id;
-  const pkg = { type, status: type === 'LOGISTICS' && !os.include_modem ? 'NOT_REQUIRED' : 'PENDING' };
-  if (pkg.status === 'NOT_REQUIRED') return { pkg, fallout: null };
+  const payloads = {
+    BILLING: { customer_id: os.customer_id, plan_code: os.plan_code, monthly_price_cents: os.monthly_price_cents, payment_preference: os.payment_preference },
+    LOGISTICS: { sku: os.modem_sku, warehouse: os.assigned_warehouse, delivery_address: os.delivery_address, carrier: 'SwiftPost' },
+    PROVISIONING: { loc_id: os.loc_id, tech_type: os.tech_type, activation_mode: os.activation_mode, speed_tier: os.speed_tier }
+  };
+  const pkg = { package_id: oid + '-PKG-' + type, type, status: type === 'LOGISTICS' && !os.include_modem ? 'NOT_REQUIRED' : 'PENDING', payload: payloads[type] };
+  if (pkg.status === 'NOT_REQUIRED') { pkg.attempts = 0; return { package: pkg, fallout: null, events: [], notifications: [] }; }
   const rules = os.fault_rules.filter((r) => r.package === type);
-  let attempts = 0, status = 'PENDING', fallout = null, reference = null;
+  const payload = Object.assign({}, pkg.payload);
+  const events = [];
+  let attempts = 0, status = 'PENDING', fallout = null, reference = null, lastError = null;
   while (attempts < os.max_attempts) {
     attempts++;
     const fired = rules.find((r) => (r.attempts_failing || []).indexOf(attempts) >= 0);
     if (!fired) {
       status = 'COMPLETED';
       reference = (type === 'BILLING' ? 'BILL-' : type === 'LOGISTICS' ? 'SWP-' : 'ACT-') + oid.slice(-6);
-      if (fallout) { fallout.status = 'RESOLVED'; }
+      events.push({ step: type, status: 'COMPLETED', detail: 'succeeded on attempt ' + attempts });
+      if (fallout) { fallout.status = 'RESOLVED'; fallout.resolved_by = 'AUTO'; fallout.retry_count = attempts - 1; events.push({ step: type, status: 'FALLOUT_RESOLVED', detail: fallout.fallout_id + ' resolved automatically' }); }
       break;
     }
-    const cat = CATEGORY_BY_PREFIX[String(fired.error_code).slice(0, 3)] || type;
-    if (!fallout) fallout = { fallout_id: 'FO-' + oid.slice(-6) + '-' + type.slice(0, 3), failed_step: type, error_code: fired.error_code, error_description: fired.error_description, queue: QUEUE_BY_CATEGORY[cat] || 'NETWORK_COORDINATION', status: 'OPEN' };
+    lastError = fired.error_code;
+    const cat = CATEGORY_BY_PREFIX[String(lastError).slice(0, 3)] || type;
+    if (!fallout) {
+      fallout = { fallout_id: 'FO-' + oid.slice(-6) + '-' + type.slice(0, 3), order_id: oid, failed_step: type, category: cat, error_code: lastError,
+        error_description: fired.error_description || '', queue: QUEUE_BY_CATEGORY[cat] || 'NETWORK_COORDINATION', status: 'OPEN', retry_count: 0,
+        escalation_reason: null, resolved_by: null, fix_history: [] };
+      events.push({ step: type, status: 'FALLOUT_DETECTED', detail: lastError + ' on attempt 1' });
+    } else events.push({ step: type, status: 'RETRY_FAILED', detail: lastError + ' on attempt ' + attempts });
+    fallout.retry_count = attempts;
     if (!fired.fixable) { fallout.status = 'ESCALATED'; fallout.escalation_reason = 'NO_SAFE_FIX'; status = 'ESCALATED'; break; }
     if (attempts >= os.max_attempts) { fallout.status = 'ESCALATED'; fallout.escalation_reason = 'RETRY_LIMIT'; status = 'ESCALATED'; break; }
+    const patch = fired.fix_patch || {};
+    Object.keys(patch).forEach((k) => { payload[k] = patch[k]; });
+    fallout.fix_history.push({ attempt: attempts, tool: fired.fix_tool || '', fix_summary: fired.fix_summary || '', fix_applied: Object.keys(patch).length > 0 });
+    fallout.status = 'AUTO_FIXING';
+    events.push({ step: type, status: 'FIX_APPLIED', detail: (fired.fix_summary || '').slice(0, 200) });
   }
-  pkg.status = status; pkg.attempts = attempts; pkg.reference = reference;
-  return { pkg, fallout };
+  Object.assign(pkg, { status, attempts, reference, payload, last_error_code: lastError });
+  return { package: pkg, fallout, events, notifications: [] };
 }
 
 function runWorkflow(rec) {
   const os = normalise(rec);
-  const packages = {}, fallouts = [];
+  const results = {}, packages = {}, fallouts = [];
   ['BILLING', 'LOGISTICS', 'PROVISIONING'].forEach((t) => {
-    const r = runPackage(os, t); packages[t] = r.pkg; if (r.fallout) fallouts.push(r.fallout);
+    const r = runPackage(os, t); results[t] = r; packages[t] = r.package; if (r.fallout) fallouts.push(r.fallout);
   });
   const escalated = Object.keys(packages).filter((k) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages[k].status) < 0);
   const first = name(os);
+  const consolidated = { order_id: os.order_id, packages, fallouts, order_status: escalated.length ? 'HELD' : 'COMPLETED', escalated_packages: escalated };
+  const steps = [
+    ['Normalise Order', { order_state: { order_id: os.order_id } }],
+    ['Decompose Into Work Packages', { order_state: { order_id: os.order_id } }],
+    ['Execute Billing Package', { billing_result: results.BILLING }],
+    ['Execute Logistics Package', { logistics_result: results.LOGISTICS }],
+    ['Execute Provisioning Package', { provisioning_result: results.PROVISIONING }],
+    ['Consolidate Package Results', { order_state: consolidated, r_all_complete: !escalated.length, r_held: !!escalated.length }]
+  ];
   if (!escalated.length) {
     const passed = packages.BILLING.status === 'COMPLETED' && ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages.LOGISTICS.status) >= 0 && packages.PROVISIONING.status === 'COMPLETED';
     const welcome = 'Hi ' + first + ', welcome to ' + os.brand + '! Your ' + os.plan_name + ' service (' + os.speed_tier + ' Mbps) is now active. Enjoy the speed, and reach out anytime if you need a hand.';
-    return {
-      held: false,
-      order_state: {
-        order_id: os.order_id, order_status: passed ? 'CLOSED' : 'VALIDATION_GAP',
-        activation_reference: packages.PROVISIONING.reference || '', plan_name: os.plan_name, speed_tier: os.speed_tier,
-        tech_type: os.tech_type, activation_mode: os.activation_mode, welcome_message: welcome.slice(0, 320),
-        welcome_channel: os.preferred_channel || 'SMS', escalated_fallout_ids: [], manual_review_required: false
-      }
+    const out = {
+      order_id: os.order_id, order_status: passed ? 'CLOSED' : 'VALIDATION_GAP',
+      activation_reference: packages.PROVISIONING.reference || '', plan_name: os.plan_name, speed_tier: os.speed_tier,
+      tech_type: os.tech_type, activation_mode: os.activation_mode, welcome_message: welcome.slice(0, 320),
+      welcome_channel: os.preferred_channel || 'SMS', escalated_fallout_ids: [], manual_review_required: false
     };
+    steps.push(['Final Validation', { close_ctx: { order_id: os.order_id, validation_passed: passed } }], ['Draft Welcome Message', { welcome_text: out.welcome_message }], ['Close Order', { order_state: out }]);
+    return { held: false, order_state: out, steps };
   }
   const esc = fallouts.filter((f) => f.status === 'ESCALATED');
   const f0 = esc[0] || {};
-  const delay = 'Hi ' + first + ', we are sorry, your ' + os.brand + ' connection is taking a little longer than expected. A specialist is already working on it and we will update you as soon as it is sorted. Thank you for your patience.';
-  return {
-    held: true,
-    order_state: {
-      order_id: os.order_id, order_status: 'HELD', activation_reference: '', manual_review_required: true,
-      escalated_fallout_ids: esc.map((f) => f.fallout_id), held_packages: escalated,
-      completed_packages: Object.keys(packages).filter((k) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages[k].status) >= 0),
-      primary_error_code: f0.error_code || '', escalation_reason: f0.escalation_reason || '', review_queue: f0.queue || '',
-      attempts_made: (packages[f0.failed_step] || {}).attempts || 0, customer_message: delay.slice(0, 320), customer_channel: os.preferred_channel || 'SMS'
-    }
+  const holdCtx = {
+    order_id: os.order_id, customer_name: os.customer_name, brand: os.brand, channel: os.preferred_channel,
+    held_packages: escalated, escalated_fallout_ids: esc.map((f) => f.fallout_id), primary_error_code: f0.error_code || '',
+    primary_error_description: f0.error_description || '', primary_queue: f0.queue || '', escalation_reason: f0.escalation_reason || '',
+    attempts_made: (packages[f0.failed_step] || {}).attempts || 0,
+    completed_packages: Object.keys(packages).filter((k) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages[k].status) >= 0)
   };
+  const delay = 'Hi ' + first + ', we are sorry, your ' + os.brand + ' connection is taking a little longer than expected. A specialist is already working on it and we will update you as soon as it is sorted. Thank you for your patience.';
+  // By default reproduce what the live run returns after the review: the delay-notice step passes
+  // Hold Ctx on with only the keys its schema lists, so Record Hold writes blanks.
+  const ctxAfter = process.env.MOCK_TRIM_HOLD === '0' ? holdCtx : { order_id: os.order_id };
+  const out = {
+    order_id: os.order_id, order_status: 'HELD', activation_reference: '', manual_review_required: true,
+    escalated_fallout_ids: ctxAfter.escalated_fallout_ids || [], held_packages: ctxAfter.held_packages || [],
+    completed_packages: ctxAfter.completed_packages || [], primary_error_code: ctxAfter.primary_error_code || '',
+    escalation_reason: ctxAfter.escalation_reason || '', review_queue: ctxAfter.primary_queue || '',
+    attempts_made: Number(ctxAfter.attempts_made || 0), customer_message: delay.slice(0, 320), customer_channel: os.preferred_channel || 'SMS'
+  };
+  steps.push(['Hold Order and Alert Team', { order_state: consolidated, hold_ctx: holdCtx }]);
+  return { held: true, order_state: out, holdCtx, steps, afterReview: [['Draft Customer Delay Notice', { delay_text: out.customer_message, hold_ctx: ctxAfter }], ['Record Hold', { order_state: out }]] };
 }
 function name(os) { return (os.customer_name || 'there').split(' ')[0]; }
 
@@ -140,9 +179,8 @@ function createMock() {
     if (c.dispatched) return;
     c.dispatched = true;
     const os = c.out.order_state;
-    const full = { order_id: os.order_id, held_packages: os.held_packages, completed_packages: os.completed_packages, primary_error_code: os.primary_error_code,
-      escalation_reason: os.escalation_reason, primary_queue: os.review_queue, attempts_made: os.attempts_made, escalated_fallout_ids: os.escalated_fallout_ids };
-    const holdCtx = process.env.MOCK_FULL_INPUTS === '1' ? full : { order_id: os.order_id };
+    // The off-platform node has no field list on its inputs, so the whole hold context arrives.
+    const holdCtx = process.env.MOCK_FULL_INPUTS === '0' ? { order_id: os.order_id } : c.out.holdCtx;
     const exec = crypto.randomUUID();
     c.exec = { id: exec, token: crypto.randomBytes(24).toString('base64url'), decided: null };
     executions.set(exec, c);
@@ -150,8 +188,9 @@ function createMock() {
     const body = {
       execution_id: exec, workflow_id: c.workflowId, workflow_name: 'Connect and Activate - Order to Activation Orchestrator',
       inputs: {
-        workflow_input_nvt4xa64h: { type: 'object', display_name: 'Order State', variable_name: 'workflow_input_nvt4xa64h', value: { order_id: os.order_id, order_status: 'HELD' } },
-        workflow_input_3t25o528j: { type: 'object', display_name: 'Hold Ctx', variable_name: 'workflow_input_3t25o528j', value: holdCtx }
+        // Real dispatches arrive without display names on inputs.
+        workflow_input_nvt4xa64h: { type: 'object', variable_name: 'workflow_input_nvt4xa64h', value: { order_id: os.order_id, order_status: 'HELD' } },
+        workflow_input_3t25o528j: { type: 'object', variable_name: 'workflow_input_3t25o528j', value: holdCtx }
       },
       callback: { url: self + '/v1/execution/callback/' + exec, token: c.exec.token, token_header: 'X-Opus-Callback-Token' },
       expected_output_schema: REVIEW_SCHEMA
@@ -179,7 +218,7 @@ function createMock() {
     if (c.fail) return 'FAILED';
     if (c.out.held && process.env.MOCK_WEBHOOK_URL) {
       dispatch(c);
-      if (!c.exec.decided) return 'WAITING';
+      if (!c.exec.decided) return process.env.MOCK_WAIT_STATUS || 'IN_PROGRESS'; // real Opus reports IN_PROGRESS here
       return Date.now() - c.exec.decided < 1200 ? 'IN_PROGRESS' : 'COMPLETED';
     }
     if (c.out.held && t < 2500 + WAIT) return 'WAITING';
@@ -191,6 +230,22 @@ function createMock() {
     if (!c) return res.status(404).json({ message: 'Case not found' });
     const s = statusOf(c);
     res.json(Object.assign({ caseId: c.id, status: s }, s === 'FAILED' ? { error: 'Execute Provisioning Package: NETCO gateway returned 503 three times' } : {}));
+  });
+  // Case Audit Log, same shape as the documented endpoint.
+  app.get('/v1/case/:id/audit', (req, res) => {
+    const c = cases.get(req.params.id);
+    if (!c) return res.status(404).json({ message: 'Case not found' });
+    const st = statusOf(c);
+    const nodes = {};
+    let i = 0;
+    const add = (name, outputs, status) => {
+      nodes[name] = { executionStatus: status || 'COMPLETED', executionStartTime: (c.started || Date.now()) + i * 300, executionTime: 120 + i * 15, executionIndex: i++,
+        executionInput: null, executionOutput: Object.keys(outputs).map((k) => ({ variableName: k, displayName: k.replace(/_/g, ' '), value: outputs[k] && typeof outputs[k] === 'object' ? JSON.stringify(outputs[k]) : outputs[k], type: typeof outputs[k] === 'object' ? 'object' : 'str' })) };
+    };
+    if (c.started && st !== 'PENDING') (c.out.steps || []).forEach((p) => add(p[0], p[1]));
+    if (c.out.held && c.exec) add('Fallout Desk Review', {}, c.exec.decided ? 'COMPLETED' : 'WAITING');
+    if (c.out.held && st === 'COMPLETED') (c.out.afterReview || []).forEach((p) => add(p[0], p[1]));
+    res.json({ totalNodeCount: 15, runningNode: '', nextNode: '', remainingNodesToExecute: [], executedNodes: Object.keys(nodes), executedNodeCount: Object.keys(nodes).length, failedNodes: [], failedNodeCount: 0, audit: { nodesExecutionData: nodes } });
   });
   app.get('/v1/case/:id/results', (req, res) => {
     const c = cases.get(req.params.id);

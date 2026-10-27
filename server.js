@@ -12,6 +12,7 @@ const store = require('./lib/store');
 const auth = require('./lib/auth');
 const opus = require('./lib/opus');
 const samples = require('./lib/samples');
+const trace = require('./lib/trace');
 
 const app = express();
 app.disable('x-powered-by');
@@ -20,9 +21,10 @@ app.use(express.json({ limit: '1mb' }));
 const ORDERS_KEY = 'ca:orders';
 const RUNLOG_INDEX = 'ca:runlogs';
 const POLL_MS = 3000;
-// The Fallout Desk Review step in the workflow times out after 10 minutes.
-// Keep this equal to that step's timeout so the console never promises more time.
-const REVIEW_WINDOW_MINUTES = Number(process.env.REVIEW_WINDOW_MINUTES || 10);
+// Time the Fallout Desk has to decide. Keep it equal to the timeout on the
+// "Fallout Desk Review" step in the workflow (60 minutes), so the console never
+// promises more time than the workflow gives.
+const REVIEW_WINDOW_MINUTES = Number(process.env.REVIEW_WINDOW_MINUTES || 60);
 const OPUS_APP_URL = process.env.OPUS_REVIEW_URL || 'https://app.opus.com';
 // Off-platform Fallout Desk Review: Opus posts the task to /api/opus/webhook with
 // this header (set the same value in the node's Custom headers), then waits for
@@ -66,6 +68,7 @@ async function runlog(id, source, level, message, detail) {
     const prev = await store.hget(RUNLOG_INDEX, id);
     const idx = prev ? JSON.parse(prev) : { id, first: entry.at, count: 0, errors: 0 };
     idx.last = entry.at; idx.count += 1; if (level === 'error') idx.errors += 1; idx.lastMessage = message;
+    if (detail && detail.order_id) idx.orderId = detail.order_id;
     await store.hset(RUNLOG_INDEX, id, JSON.stringify(idx));
   } catch (e) { /* logging must never break a request */ }
 }
@@ -92,7 +95,8 @@ async function allOrders() {
     .map((o) => { o.review = reviews && reviews[o.id] ? parse(reviews[o.id]) : null; return o; })
     .sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''));
 }
-function canSee(u, o) { return u.role !== 'coordinator' || o.submittedBy === u.id; }
+// A coordinator sees every run of an order they submitted, including runs the desk sent again.
+function canSee(u, o) { return u.role !== 'coordinator' || (o.orderOwner || o.submittedBy) === u.id; }
 
 const ACTIVE_STAGES = ['starting', 'running', 'with_desk'];
 
@@ -104,6 +108,88 @@ function stageFromStatus(s) {
   if (s === 'CANCELLED' || s === 'CANCELED') return 'cancelled';
   if (s === 'FAILED' || s === 'ERROR') return 'failed';
   return 'running';
+}
+
+/* Read what each workflow step did (Case Audit Log) and keep a compact summary on the order. */
+async function readTrace(o, why) {
+  if (!o.caseId) return o;
+  try {
+    const a = await opus.audit(o.caseId);
+    const t = trace.fromAudit(a);
+    const firstRead = !o.trace;
+    o.trace = t;
+    if (firstRead || why === 'finished') {
+      await runlog(o.id, 'opus', 'info', 'Steps read from Opus (' + why + ')', {
+        steps: t.steps.map((s) => s.name + ': ' + s.status + (s.ms != null ? ' ' + s.ms + 'ms' : '')),
+        packages: Object.keys(t.packages).map((k) => k + ' ' + t.packages[k].status + ' after ' + t.packages[k].attempts + ' attempt(s)'),
+        fixes: trace.fixLines(t).map((f) => f.package + ' attempt ' + f.attempt + ': ' + f.summary)
+      });
+      t.steps.filter((s) => s.status === 'FAILED').forEach((s) => runlog(o.id, 'opus', 'error', 'Step failed: ' + s.name, {}));
+    }
+  } catch (e) {
+    o.traceError = e.message;
+    await runlog(o.id, 'opus', 'error', 'Reading the step log failed', { error: e.message, status: e.status || null });
+  }
+  return o;
+}
+
+/* The order's stage as every screen shows it: an open task from Opus means the desk has it. */
+function rowStage(o) {
+  return o.review && o.review.status === 'open' && ACTIVE_STAGES.indexOf(o.stage) >= 0 ? 'with_desk' : o.stage;
+}
+/* One category per order, used by every count on every page. */
+function category(o) {
+  const s = rowStage(o);
+  if (s === 'activated') return 'activated';
+  if ((s === 'held' || s === 'with_desk') && o.resolution && o.resolution.decision === 'cancel_order') return 'cancelled';
+  if (s === 'held' || s === 'with_desk') return 'held';
+  if (s === 'running' || s === 'starting') return 'running';
+  return 'problem';
+}
+/* A reprocessed or repeated order number is one order: keep its newest run. */
+function latestRuns(list) {
+  const newest = {};
+  list.forEach((o) => {
+    const k = (o.record && o.record.order_id) || o.id;
+    if (!newest[k] || (o.submittedAt || '') > (newest[k].submittedAt || '')) newest[k] = o;
+  });
+  return list.filter((o) => newest[(o.record && o.record.order_id) || o.id] === o);
+}
+function runCounts(list) {
+  const m = {};
+  list.forEach((o) => { const k = (o.record && o.record.order_id) || o.id; m[k] = (m[k] || 0) + 1; });
+  return m;
+}
+
+/* The held output's error, queue, attempts and package lists can come back empty from
+   the last steps of the run. Fill any blank field from what the run itself recorded
+   earlier (the Hold step's output, then the review task), never from guesses. */
+const HOLD_KEYS = ['held_packages', 'completed_packages', 'primary_error_code', 'escalation_reason', 'review_queue', 'attempts_made', 'escalated_fallout_ids'];
+function isBlank(k, v) {
+  return v == null || v === '' || (Array.isArray(v) && !v.length) || (k === 'attempts_made' && !Number(v));
+}
+function effective(o) {
+  if (o.path === 'closed') return o.result || null;
+  const sources = [o.trace && o.trace.hold, o.holdFacts, reviewFacts(o.review)].filter(Boolean);
+  if (!o.result && !sources.length) return null;
+  const base = Object.assign({}, o.result || {});
+  const filled = [];
+  HOLD_KEYS.forEach((k) => {
+    if (!isBlank(k, base[k])) return;
+    const src = sources.find((s) => !isBlank(k, s[k]));
+    if (src) { base[k] = src[k]; filled.push(k); }
+  });
+  const pk = o.trace && o.trace.packages;
+  if (pk && isBlank('held_packages', base.held_packages)) {
+    const h = Object.keys(pk).filter((t) => pk[t].status && ['COMPLETED', 'NOT_REQUIRED'].indexOf(pk[t].status) < 0);
+    if (h.length) { base.held_packages = h; filled.push('held_packages'); }
+  }
+  if (pk && isBlank('completed_packages', base.completed_packages)) {
+    const c = Object.keys(pk).filter((t) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(pk[t].status) >= 0);
+    if (c.length) { base.completed_packages = c; filled.push('completed_packages'); }
+  }
+  if (filled.length) Object.defineProperty(base, '_filled', { value: filled, enumerable: false });
+  return base;
 }
 
 async function refresh(o, force) {
@@ -128,8 +214,10 @@ async function refresh(o, force) {
       await runlog(o.id, 'opus', stage === 'failed' || stage === 'timed_out' ? 'error' : 'info',
         'Status changed to ' + st.raw, { from: o.stage, to: stage });
       if (stage === 'with_desk' && !o.waitingSince) o.waitingSince = now();
+      if (stage === 'with_desk' && !o.trace) await readTrace(o, 'held for review');
       if (stage === 'failed' || stage === 'timed_out' || stage === 'cancelled') {
         o.finishedAt = now();
+        await readTrace(o, 'stopped');
         const why = st.data && (st.data.error || st.data.message || st.data.reason);
         if (why) o.failure = typeof why === 'string' ? why : JSON.stringify(why).slice(0, 400);
       }
@@ -153,6 +241,7 @@ async function refresh(o, force) {
     }
     o.finishedAt = now();
     if (o.waitingSince && !o.deskDoneAt) o.deskDoneAt = now();
+    await readTrace(o, 'finished');
     // The run finished without a decision from the console (the review step closed): retire the task.
     if (o.review && o.review.status === 'open') {
       o.review.status = 'closed';
@@ -175,7 +264,8 @@ function toRow(o) {
   const rec = o.record || {};
   const cust = rec.customer || {};
   const plan = rec.plan || {};
-  const res = o.result || reviewFacts(o.review) || {};
+  const res = effective(o) || {};
+  const fixes = trace.fixLines(o.trace);
   return {
     id: o.id,
     orderId: rec.order_id,
@@ -186,8 +276,10 @@ function toRow(o) {
     speed: plan.speed_tier || 0,
     techType: (rec.service || {}).tech_type || '',
     includeModem: !!rec.include_modem,
-    stage: o.review && o.review.status === 'open' && ACTIVE_STAGES.indexOf(o.stage) >= 0 ? 'with_desk' : o.stage,
+    stage: rowStage(o),
+    category: category(o),
     opusStatus: o.opusStatus || null,
+    autoFixed: fixes.some((f) => f.recovered),
     path: o.path || null,
     activationReference: res.activation_reference || '',
     errorCode: res.primary_error_code || '',
@@ -231,9 +323,16 @@ function reviewFacts(r) {
 }
 
 function toDetail(o) {
+  const res = effective(o);
   return Object.assign(toRow(o), {
     record: o.record,
-    result: o.result || null,
+    result: res,
+    outputRaw: o.result || null,
+    filledFromRun: res && res._filled ? res._filled : [],
+    trace: o.trace ? { packages: o.trace.packages, steps: o.trace.steps, fixes: trace.fixLines(o.trace), readAt: o.trace.readAt } : null,
+    traceError: o.trace ? null : (o.traceError || null),
+    resolutionCorrections: o.resolution && o.resolution.corrections ? o.resolution.corrections : null,
+    corrections: o.corrections || null,
     caseRef: o.caseId ? mask(o.caseId, 2, 2) : null,
     deskDoneAt: o.deskDoneAt || null,
     reprocessedAs: o.reprocessedAs || null,
@@ -276,14 +375,13 @@ app.post('/api/logout', (req, res) => { auth.clearSession(res); res.json({ ok: t
 
 /* ------------------------------------------------------------------ signed in */
 app.get('/api/me', need(), wrap(async (req, res) => {
-  const orders = await allOrders();
-  const deskCount = orders.filter((o) => (o.review && o.review.status === 'open') || o.stage === 'with_desk' || (o.stage === 'held' && !o.resolution)).length;
+  const orders = latestRuns(await allOrders());
+  const deskCount = orders.filter((o) => category(o) === 'held' && !o.resolution).length;
   res.json({
     user: auth.publicUser(req.user),
     opusConnected: opus.missingEnv().length === 0,
     storage: store.kind,
     reviewWindowMinutes: REVIEW_WINDOW_MINUTES,
-    opusReviewUrl: OPUS_APP_URL,
     webhookMode: !!WEBHOOK_SECRET,
     deskCount: req.user.role === 'coordinator' ? 0 : deskCount
   });
@@ -371,7 +469,9 @@ app.get('/api/orders', need(), wrap(async (req, res) => {
   const active = list.filter((o) => ACTIVE_STAGES.indexOf(o.stage) >= 0).slice(0, 6);
   await Promise.all(active.map((o) => refresh(o)));
   if (active.length) list = (await allOrders()).filter((o) => canSee(req.user, o));
-  res.json({ orders: list.map(toRow) });
+  const latest = new Set(latestRuns(list).map((o) => o.id));
+  const runs = runCounts(list);
+  res.json({ orders: list.map((o) => Object.assign(toRow(o), { latest: latest.has(o.id), runs: runs[(o.record && o.record.order_id) || o.id] || 1 })) });
 }));
 
 app.get('/api/orders/:id', need(), wrap(async (req, res) => {
@@ -379,8 +479,52 @@ app.get('/api/orders/:id', need(), wrap(async (req, res) => {
   let o = await getOrder(req.params.id);
   if (!o || !canSee(req.user, o)) return res.status(404).json({ error: 'Order not found.' });
   o = await refresh(o, req.query.force === '1');
-  res.json({ order: toDetail(o) });
+  const d = toDetail(o);
+  if (o.reprocessOf) {
+    const first = await getOrder(o.reprocessOf);
+    if (first && first.trace) d.firstRunPackages = Object.keys(first.trace.packages).reduce((m, t) => { const p = first.trace.packages[t]; m[t] = { status: p.status, reference: p.reference }; return m; }, {});
+  }
+  res.json({ order: d });
 }));
+
+/* Field-level corrections the desk can make before an order runs again. */
+function readCorrections(c, rec) {
+  const out = {};
+  const errs = [];
+  c = c || {};
+  const svc = (rec && rec.service) || {}, cust = (rec && rec.customer) || {}, modem = (rec && rec.modem) || {};
+  if (c.loc_id != null && String(c.loc_id).trim()) {
+    const v = String(c.loc_id).trim().toUpperCase();
+    if (!/^LOC\d{12}$/.test(v)) errs.push('A LOC ID is LOC followed by 12 digits.');
+    else if (v !== svc.loc_id) out.loc_id = v;
+  }
+  if (c.delivery_address != null && String(c.delivery_address).trim()) {
+    const v = String(c.delivery_address).trim().toUpperCase().replace(/\s+/g, ' ');
+    if (v.length < 8) errs.push('The delivery address looks too short.');
+    else if (v !== cust.delivery_address) out.delivery_address = v;
+  }
+  if (c.modem_sku && rec && rec.include_modem && c.modem_sku !== modem.sku) {
+    if (!samples.MODEMS[c.modem_sku]) errs.push('Choose a modem from the list.');
+    else out.modem_sku = c.modem_sku;
+  }
+  if (typeof c.existing_active_service === 'boolean' && c.existing_active_service !== !!svc.existing_active_service) out.existing_active_service = c.existing_active_service;
+  return { changes: out, errors: errs };
+}
+function applyCorrections(rec, changes, clearFaults) {
+  const r = JSON.parse(JSON.stringify(rec));
+  const notes = [];
+  if (changes.loc_id) { r.service = Object.assign({}, r.service, { loc_id: changes.loc_id }); notes.push('LOC ID ' + changes.loc_id); }
+  if (changes.delivery_address) { r.customer = Object.assign({}, r.customer, { delivery_address: changes.delivery_address }); notes.push('delivery address'); }
+  if (changes.modem_sku) { r.modem = Object.assign({}, r.modem, { sku: changes.modem_sku, name: samples.MODEMS[changes.modem_sku] }); notes.push('modem ' + changes.modem_sku); }
+  if (typeof changes.existing_active_service === 'boolean') { r.service = Object.assign({}, r.service, { existing_active_service: changes.existing_active_service }); notes.push(changes.existing_active_service ? 'existing service: yes' : 'existing service: none'); }
+  const clear = Array.isArray(clearFaults) ? clearFaults.filter((p) => ['BILLING', 'LOGISTICS', 'PROVISIONING'].indexOf(p) >= 0) : [];
+  if (clear.length && Array.isArray(r.fault_rules)) {
+    const before = r.fault_rules.length;
+    r.fault_rules = r.fault_rules.filter((f) => clear.indexOf(f.package) < 0);
+    if (r.fault_rules.length < before) notes.push('simulated fault cleared on ' + clear.map((p) => p.toLowerCase()).join(', '));
+  }
+  return { record: r, notes };
+}
 
 const DECISIONS = {
   reprocess: 'Reprocess the order',
@@ -407,15 +551,22 @@ app.post('/api/orders/:id/resubmit', need('desk', 'admin'), wrap(async (req, res
   if (!o) return res.status(404).json({ error: 'Order not found.' });
   let rec = o.record;
   const b = req.body || {};
-  if (b.recordText) {
+  let notes = [];
+  if (b.recordText && req.user.role === 'admin') {
     try { rec = JSON.parse(b.recordText); } catch (e) { return res.status(400).json({ error: 'The corrected record is not valid JSON: ' + e.message }); }
-    const errs = validateRecord(rec);
-    if (errs.length) return res.status(400).json({ error: errs.join(' ') });
+    notes = ['full record edited'];
+  } else {
+    const c = readCorrections(b.corrections, rec);
+    if (c.errors.length) return res.status(400).json({ error: c.errors.join(' ') });
+    const a = applyCorrections(rec, c.changes, b.clearFaults);
+    rec = a.record; notes = a.notes;
   }
-  const n = await startRun(rec, req.user, { reprocessOf: o.id });
+  const errs = validateRecord(rec);
+  if (errs.length) return res.status(400).json({ error: errs.join(' ') });
+  const n = await startRun(rec, req.user, { reprocessOf: o.id, corrections: notes, orderOwner: o.orderOwner || o.submittedBy, orderOwnerName: o.orderOwnerName || o.submittedByName });
   o.reprocessedAs = n.id;
   await saveOrder(o);
-  await runlog(o.id, 'console', 'info', 'Order sent for reprocessing', { newRun: n.id, corrected: !!b.recordText });
+  await runlog(o.id, 'console', 'info', 'Order sent for reprocessing', { newRun: n.id, corrections: notes });
   res.status(201).json({ order: toDetail(n) });
 }));
 
@@ -430,6 +581,10 @@ app.delete('/api/orders/:id', need('admin'), wrap(async (req, res) => {
 app.post('/api/orders-clear', need('admin'), wrap(async (req, res) => {
   const all = await allOrders();
   for (const o of all) { await store.hdel(ORDERS_KEY, o.id); await store.hdel(REVIEWS_KEY, o.id); await store.hdel(REVIEW_SECRET_KEY, o.id); }
+  // Unmatched tasks and the list of calls from Opus go too; run logs are kept for engineering.
+  const reviews = await store.hgetall(REVIEWS_KEY);
+  for (const k of Object.keys(reviews || {})) { await store.hdel(REVIEWS_KEY, k); await store.hdel(REVIEW_SECRET_KEY, k); }
+  await store.del(WEBHOOK_LOG);
   res.json({ ok: true, removed: all.length });
 }));
 
@@ -520,7 +675,9 @@ async function relinkReviews() {
     await store.hset(REVIEWS_KEY, o.id, JSON.stringify(r));
     if (cb) await store.hset(REVIEW_SECRET_KEY, o.id, cb);
     await store.hdel(REVIEWS_KEY, k); await store.hdel(REVIEW_SECRET_KEY, k);
-    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || r.receivedAt; await saveOrder(o); }
+    o.holdFacts = reviewFacts(r);
+    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || r.receivedAt; }
+    await saveOrder(o);
     await runlog(o.id, 'opus', 'info', 'Fallout Desk task linked to this order', { execution: r.executionId, by: id ? 'order number' : 'only order in progress' });
     await webhookLog({ accepted: true, reason: 'Linked earlier task to order ' + o.record.order_id, execution: mask(r.executionId, 4, 4) });
     linked++;
@@ -529,19 +686,18 @@ async function relinkReviews() {
 }
 
 app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) => {
-  const headerNames = Object.keys(req.headers).filter((h) => /^x-|^authorization$/.test(h));
   if (!WEBHOOK_SECRET) {
-    await webhookLog({ accepted: false, reason: 'Webhook secret not set on the console', headers: headerNames });
+    await webhookLog({ accepted: false, reason: 'The console has no webhook secret yet' });
     return res.status(503).json({ error: 'Webhook not configured.' });
   }
   if (!sameSecret(req.headers[WEBHOOK_HEADER], WEBHOOK_SECRET) && !sameSecret(req.params.key, WEBHOOK_SECRET)) {
-    await webhookLog({ accepted: false, reason: req.params.key ? 'Wrong secret in the webhook address' : 'Missing or wrong ' + WEBHOOK_HEADER + ' header', headers: headerNames });
+    await webhookLog({ accepted: false, reason: req.params.key ? 'Wrong secret in the webhook address' : 'No secret in the address or header' });
     return res.status(401).json({ error: 'Not authorised.' });
   }
   const b = req.body || {};
   const cb = b.callback || {};
   if (!b.execution_id || !cb.url || !cb.token) {
-    await webhookLog({ accepted: false, reason: 'Body has no execution_id or callback', headers: headerNames });
+    await webhookLog({ accepted: false, reason: 'The task had no execution id or reply address' });
     return res.status(400).json({ error: 'execution_id and callback are required.' });
   }
   if (!callbackAllowed(cb.url)) {
@@ -563,10 +719,12 @@ app.post(['/api/opus/webhook', '/api/opus/webhook/:key'], wrap(async (req, res) 
   };
   await store.hset(REVIEW_SECRET_KEY, key, JSON.stringify({ url: cb.url, token: cb.token, token_header: cb.token_header || 'X-Opus-Callback-Token' }));
   await store.hset(REVIEWS_KEY, key, JSON.stringify(review));
-  await webhookLog({ accepted: true, reason: o ? 'Matched order ' + orderId : 'No console order for ' + (orderId || 'this task'), execution: mask(b.execution_id, 4, 4), headers: headerNames });
+  await webhookLog({ accepted: true, reason: o ? 'Matched order ' + orderId : 'No console order for ' + (orderId || 'this task') + ' yet', execution: mask(b.execution_id, 4, 4) });
   if (o) {
+    o.holdFacts = reviewFacts(review);
     await runlog(o.id, 'opus', 'info', 'Fallout Desk task received from Opus', { execution: b.execution_id, outputs: review.outputs, inputs: Object.keys(inputs) });
-    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || now(); await saveOrder(o); }
+    if (o.stage === 'running' || o.stage === 'starting') { o.stage = 'with_desk'; o.waitingSince = o.waitingSince || now(); }
+    await saveOrder(o);
   }
   res.json({ received: true });
 }));
@@ -604,11 +762,9 @@ app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) 
   const note = String(b.note || '').trim().slice(0, 4000);
   if (!DECISIONS[d]) return res.status(400).json({ error: 'Choose one resolution.' });
   if (note.length < 5) return res.status(400).json({ error: 'Add a short reviewer note.' });
-  let corrected = null;
-  if (b.correctedText && String(b.correctedText).trim()) {
-    try { corrected = JSON.parse(b.correctedText); } catch (e) { return res.status(400).json({ error: 'The corrected details are not valid JSON: ' + e.message }); }
-    if (!corrected || typeof corrected !== 'object' || Array.isArray(corrected)) return res.status(400).json({ error: 'The corrected details must be a JSON object.' });
-  }
+  const c = readCorrections(b.corrections, o.record);
+  if (c.errors.length) return res.status(400).json({ error: c.errors.join(' ') });
+  const corrected = Object.keys(c.changes).length ? Object.assign({ order_id: o.record.order_id }, c.changes) : null;
   const cb = parse(await store.hget(REVIEW_SECRET_KEY, o.id));
   if (!cb) return res.status(400).json({ error: 'The callback for this task is missing, so the decision cannot be sent.' });
   const output = buildOutputs(review, d, note, corrected);
@@ -637,7 +793,9 @@ app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) 
   review.status = 'sent'; review.sentAt = now(); review.error = null;
   await store.hset(REVIEWS_KEY, o.id, JSON.stringify(review));
   await store.hdel(REVIEW_SECRET_KEY, o.id); // single-use
-  o.resolution = { decision: d, label: DECISIONS[d], note, by: req.user.name, byId: req.user.id, at: now(), sentToOpus: true, corrected: !!corrected };
+  // Keep what the review task showed, so the hold detail survives whatever the last steps return.
+  o.holdFacts = o.holdFacts || reviewFacts(review);
+  o.resolution = { decision: d, label: DECISIONS[d], note, by: req.user.name, byId: req.user.id, at: now(), sentToOpus: true, corrected: !!corrected, corrections: corrected ? c.changes : null };
   await saveOrder(o);
   await runlog(o.id, 'opus', 'info', 'Decision sent to Opus and accepted', meta);
   o.review = review;
@@ -654,7 +812,7 @@ app.get('/api/reviews-unmatched', need('admin'), wrap(async (req, res) => {
 
 app.get('/api/webhook-log', need('admin'), wrap(async (req, res) => {
   const list = (await store.list(WEBHOOK_LOG)).map(parse).filter(Boolean).reverse();
-  res.json({ calls: list.slice(0, 20), secretSet: !!WEBHOOK_SECRET, header: 'X-Webhook-Secret', path: '/api/opus/webhook', storage: store.kind });
+  res.json({ calls: list.slice(0, 20).map((c) => ({ at: c.at, accepted: c.accepted, reason: c.reason, execution: c.execution || '' })), secretSet: !!WEBHOOK_SECRET, path: '/api/opus/webhook', storage: store.kind });
 }));
 
 /* ------------------------------------------------------------------ reports */
@@ -662,19 +820,32 @@ function monthKey(iso) { return (iso || '').slice(0, 7); }
 
 app.get('/api/report', need(), wrap(async (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : now().slice(0, 7);
-  const mine = (await allOrders()).filter((o) => canSee(req.user, o));
+  let mine = (await allOrders()).filter((o) => canSee(req.user, o));
+  // Bring in-flight runs up to date first, so "still running" is never stale.
+  const active = mine.filter((o) => ACTIVE_STAGES.indexOf(o.stage) >= 0).slice(0, 10);
+  if (active.length) { await Promise.all(active.map((o) => refresh(o))); mine = (await allOrders()).filter((o) => canSee(req.user, o)); }
   const months = Array.from(new Set(mine.map((o) => monthKey(o.submittedAt)).concat([now().slice(0, 7)]))).sort().reverse();
-  const list = mine.filter((o) => monthKey(o.submittedAt) === month && !o.duplicateOf);
-  const count = (f) => list.filter(f).length;
-  const finished = list.filter((o) => ['activated', 'held', 'validation_gap'].indexOf(o.stage) >= 0);
+  // One order = one order number. Reprocessed and repeated submissions count once, by their newest run.
+  const monthRuns = mine.filter((o) => monthKey(o.submittedAt) === month);
+  const list = latestRuns(mine).filter((o) => monthKey(o.submittedAt) === month);
+  const by = (cat) => list.filter((o) => category(o) === cat);
+  const held = by('held');
+  const activated = by('activated');
+  const cancelled = by('cancelled');
+  const eff = (o) => effective(o) || {};
+  // Why orders were held: every order that was held at some point this month, once each,
+  // by its first held run — including orders that were sent again and activated since.
+  const heldRuns = monthRuns.filter((o) => o.path === 'held' || ['held', 'cancelled'].indexOf(category(o)) >= 0)
+    .sort((a, b) => (a.submittedAt || '').localeCompare(b.submittedAt || ''));
+  const heldOnce = [];
+  const seen = {};
+  heldRuns.forEach((o) => { const k = (o.record && o.record.order_id) || o.id; if (!seen[k]) { seen[k] = 1; heldOnce.push(o); } });
+  const decided = monthRuns.filter((o) => o.resolution);
   const tally = (arr, key) => {
     const m = {};
     arr.forEach((o) => { const k = key(o); if (k) m[k] = (m[k] || 0) + 1; });
     return Object.entries(m).map(([k, v]) => ({ key: k, count: v })).sort((a, b) => b.count - a.count);
   };
-  const held = list.filter((o) => o.stage === 'held');
-  // Daily series for the month: activated vs held vs other.
-  // Every day of the month up to today, so the chart has a real time axis.
   const days = {};
   const [yy, mm] = month.split('-').map(Number);
   const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
@@ -687,27 +858,33 @@ app.get('/api/report', need(), wrap(async (req, res) => {
   list.forEach((o) => {
     const d = (o.submittedAt || '').slice(0, 10);
     days[d] = days[d] || { day: d, activated: 0, held: 0, other: 0 };
-    if (o.stage === 'activated') days[d].activated++; else if (o.stage === 'held') days[d].held++; else days[d].other++;
+    const c = category(o);
+    if (c === 'activated') days[d].activated++; else if (c === 'held') days[d].held++; else days[d].other++;
   });
-  const avgAttempts = held.length ? held.reduce((s, o) => s + Number((o.result || {}).attempts_made || 0), 0) / held.length : 0;
+  const attempts = heldOnce.map((o) => Number(eff(o).attempts_made || 0)).filter((n) => n > 0);
+  const autoFixed = activated.filter((o) => trace.fixLines(o.trace).some((f) => f.recovered));
   res.json({
     month, months, scope: req.user.role === 'coordinator' ? 'mine' : 'all',
     totals: {
       submitted: list.length,
-      finished: finished.length,
-      activated: count((o) => o.stage === 'activated'),
+      activated: activated.length,
       held: held.length,
-      validationGap: count((o) => o.stage === 'validation_gap'),
-      inFlight: count((o) => ACTIVE_STAGES.indexOf(o.stage) >= 0),
-      failed: count((o) => ['failed', 'timed_out', 'cancelled'].indexOf(o.stage) >= 0),
+      cancelled: cancelled.length,
+      awaitingDecision: held.filter((o) => !o.resolution).length,
+      inFlight: by('running').length,
+      failed: by('problem').length,
+      heldAtSomePoint: heldOnce.length,
+      decisions: decided.length,
       resolved: held.filter((o) => o.resolution).length,
-      avgAttemptsHeld: Math.round(avgAttempts * 10) / 10
+      autoFixed: autoFixed.length,
+      reprocessed: list.filter((o) => o.reprocessOf).length,
+      avgAttemptsHeld: attempts.length ? Math.round(attempts.reduce((a, b) => a + b, 0) / attempts.length * 10) / 10 : 0
     },
-    byErrorCode: tally(held, (o) => (o.result || {}).primary_error_code).map((x) => Object.assign(x, { text: samples.ERROR_CATALOGUE[x.key] || '' })),
-    byQueue: tally(held, (o) => (o.result || {}).review_queue),
-    byReason: tally(held, (o) => (o.result || {}).escalation_reason),
-    byResolution: tally(held, (o) => (o.resolution ? o.resolution.decision : 'awaiting')),
-    byPlan: tally(finished, (o) => ((o.record || {}).plan || {}).name),
+    byErrorCode: tally(heldOnce, (o) => eff(o).primary_error_code).map((x) => Object.assign(x, { text: samples.ERROR_CATALOGUE[x.key] || '' })),
+    byQueue: tally(heldOnce, (o) => eff(o).review_queue),
+    byReason: tally(heldOnce, (o) => eff(o).escalation_reason),
+    byResolution: tally(heldOnce, (o) => { const r = monthRuns.find((x) => x.record && o.record && x.record.order_id === o.record.order_id && x.resolution); return r ? r.resolution.decision : 'awaiting'; }),
+    byPlan: tally(activated, (o) => ((o.record || {}).plan || {}).name),
     daily: Object.values(days).sort((a, b) => a.day.localeCompare(b.day))
   });
 }));
@@ -760,7 +937,7 @@ app.get('/api/system', need('admin'), wrap(async (req, res) => {
       heldOutput: mask(opus.OUTPUT_HELD, 18, 2)
     },
     opusConnected: opus.missingEnv().length === 0,
-    missing: opus.missingEnv().map((m) => m === 'OPUS_API_BASE' ? 'The Opus API address (OPUS_API_BASE)' : 'The Opus service key (OPUS_SERVICE_KEY)'),
+    missing: opus.missingEnv().map((m) => m === 'OPUS_API_BASE' ? 'the Opus API address' : 'the Opus service key'),
     storage: store.kind,
     sessionSecretSet: !auth.secretIsEphemeral,
     demoSignIn: auth.demoSignInEnabled(),
@@ -773,7 +950,7 @@ app.get('/api/runlogs', need('admin'), wrap(async (req, res) => {
   const idx = await store.hgetall(RUNLOG_INDEX);
   const orders = await allOrders();
   const list = Object.values(idx || {}).map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean)
-    .map((x) => { const o = orders.find((y) => y.id === x.id); return Object.assign(x, { orderId: o ? o.record.order_id : null, stage: o ? o.stage : 'deleted' }); })
+    .map((x) => { const o = orders.find((y) => y.id === x.id); return Object.assign(x, { orderId: o ? o.record.order_id : (x.orderId || null), stage: o ? rowStage(o) : 'deleted' }); })
     .sort((a, b) => (b.last || '').localeCompare(a.last || ''));
   res.json({ runs: list.slice(0, 200) });
 }));
@@ -794,6 +971,8 @@ app.get('/api/runlogs/:id', need('admin'), wrap(async (req, res) => {
 /* ------------------------------------------------------------------ static */
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
+// Any other unknown address gets the console's own "page not found", inside the app.
+app.use((req, res) => res.status(404).sendFile(path.join(__dirname, 'public', '404.html')));
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Something went wrong on the server: ' + (err.message || 'unknown error') });
