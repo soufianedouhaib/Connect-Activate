@@ -210,11 +210,16 @@ async function refresh(o, force) {
   // Opus reports IN_PROGRESS while an off-platform step waits; an open task means the desk has it.
   if (stage === 'running' && o.review && o.review.status === 'open') stage = 'with_desk';
   if (stage !== 'completed') {
+    // The webhook may already have moved the order to the desk, so read the step log on
+    // any check while it waits, not only when the status changes (at most every 20 s).
+    if (stage === 'with_desk' && !o.trace && (!o.traceTriedAt || Date.now() - Date.parse(o.traceTriedAt) > 20000)) {
+      o.traceTriedAt = now();
+      await readTrace(o, 'held for review');
+    }
     if (stage !== o.stage) {
       await runlog(o.id, 'opus', stage === 'failed' || stage === 'timed_out' ? 'error' : 'info',
         'Status changed to ' + st.raw, { from: o.stage, to: stage });
       if (stage === 'with_desk' && !o.waitingSince) o.waitingSince = now();
-      if (stage === 'with_desk' && !o.trace) await readTrace(o, 'held for review');
       if (stage === 'failed' || stage === 'timed_out' || stage === 'cancelled') {
         o.finishedAt = now();
         await readTrace(o, 'stopped');
@@ -322,9 +327,66 @@ function reviewFacts(r) {
   };
 }
 
+/* "Cancel the affected package": only the modem shipment can be dropped from an order.
+   Billing and network activation are what the service is, so without them there is
+   nothing left to activate. */
+function dropPlan(o) {
+  const res = effective(o) || {};
+  const held = res.held_packages || [];
+  if (!o.record || !o.record.include_modem) return { ok: false, why: 'This order has no modem shipment to drop.' };
+  if (held.length === 1 && held[0] === 'LOGISTICS') return { ok: true, pkg: 'LOGISTICS' };
+  if (!held.length) return { ok: false, why: 'The held package is not known yet.' };
+  return { ok: false, why: 'Only the modem shipment can be dropped from an order. ' + (held.indexOf('LOGISTICS') >= 0 ? 'Billing or network activation is held too, and the' : 'The') + ' service cannot be activated without billing and network activation, so reprocess the order or cancel it.' };
+}
+function dropRecord(rec) {
+  const r = JSON.parse(JSON.stringify(rec));
+  r.include_modem = false;
+  r.modem = { sku: '', name: '', assigned_warehouse: '' };
+  if (Array.isArray(r.fault_rules)) r.fault_rules = r.fault_rules.filter((f) => f.package !== 'LOGISTICS');
+  return r;
+}
+async function runWithoutModem(o, user) {
+  const n = await startRun(dropRecord(o.record), user, {
+    reprocessOf: o.id, droppedPackage: 'LOGISTICS', corrections: ['modem shipment dropped at the Fallout Desk'],
+    orderOwner: o.orderOwner || o.submittedBy, orderOwnerName: o.orderOwnerName || o.submittedByName
+  });
+  o.reprocessedAs = n.id;
+  await saveOrder(o);
+  await runlog(o.id, 'console', 'info', 'Order sent again without the modem shipment', { newRun: n.id, by: user.name });
+  return n;
+}
+
+/* The workflow drafts the same delay notice whatever the desk decides. For a cancelled
+   order the console writes the cancellation notice from the error on the order. */
+const CUSTOMER_REASON = {
+  'BIL-101': 'we could not set up billing with the account details on the order',
+  'BIL-204': 'the plan on the order is no longer available',
+  'BIL-310': 'the payment method on the order was declined',
+  'LOG-110': 'we could not confirm the delivery address for your modem',
+  'LOG-220': 'the modem for your order is out of stock',
+  'LOG-330': 'we could not arrange delivery of your modem',
+  'PRV-410': 'there is already an active service at your address',
+  'PRV-420': 'the address on the order does not match our network records',
+  'PRV-430': 'we could not book a technician visit for your connection'
+};
+function cancelNotice(o, res) {
+  if (category(o) !== 'cancelled') return null;
+  const rec = o.record || {}, c = rec.customer || {};
+  const channel = String((res && res.customer_channel) || c.preferred_channel || 'SMS').toUpperCase() === 'EMAIL' ? 'EMAIL' : 'SMS';
+  const why = CUSTOMER_REASON[(res && res.primary_error_code) || ''] || 'we could not complete the connection at your address';
+  const text = 'Hi ' + (c.first_name || 'there') + ', your Orbit Telecom order ' + rec.order_id + ' has been cancelled because ' + why + '. ' +
+    'If you would still like to connect, reply to this message or call us and we will help you place a new order.';
+  return { channel, to: channel === 'EMAIL' ? (c.email || '') : (c.mobile || ''), text };
+}
+
 function toDetail(o) {
   const res = effective(o);
+  const drop = (o.stage === 'held' || o.stage === 'with_desk') ? dropPlan(o) : null;
   return Object.assign(toRow(o), {
+    droppedPackage: o.droppedPackage || null,
+    canDropPackage: drop ? drop.ok : false,
+    dropBlocked: drop && !drop.ok ? drop.why : null,
+    cancelNotice: cancelNotice(o, res),
     record: o.record,
     result: res,
     outputRaw: o.result || null,
@@ -540,9 +602,12 @@ app.post('/api/orders/:id/resolution', need('desk', 'admin'), wrap(async (req, r
   const note = String((req.body || {}).note || '').trim().slice(0, 2000);
   if (!DECISIONS[d]) return res.status(400).json({ error: 'Choose one resolution.' });
   if (note.length < 5) return res.status(400).json({ error: 'Add a short reviewer note.' });
+  const drop = d === 'cancel_package' ? dropPlan(o) : null;
+  if (drop && !drop.ok) return res.status(400).json({ error: drop.why });
   o.resolution = { decision: d, label: DECISIONS[d], note, by: req.user.name, byId: req.user.id, at: now() };
   await saveOrder(o);
   await runlog(o.id, 'console', 'info', 'Fallout Desk resolution recorded', { decision: d, by: req.user.name });
+  if (drop && !o.reprocessedAs) await runWithoutModem(o, req.user);
   res.json({ order: toDetail(o) });
 }));
 
@@ -552,6 +617,13 @@ app.post('/api/orders/:id/resubmit', need('desk', 'admin'), wrap(async (req, res
   let rec = o.record;
   const b = req.body || {};
   let notes = [];
+  if (b.dropModem) {
+    if (o.reprocessedAs) return res.status(400).json({ error: 'This order was already sent again.' });
+    const drop = dropPlan(o);
+    if (!drop.ok) return res.status(400).json({ error: drop.why });
+    const n = await runWithoutModem(o, req.user);
+    return res.status(201).json({ order: toDetail(n) });
+  }
   if (b.recordText && req.user.role === 'admin') {
     try { rec = JSON.parse(b.recordText); } catch (e) { return res.status(400).json({ error: 'The corrected record is not valid JSON: ' + e.message }); }
     notes = ['full record edited'];
@@ -762,6 +834,8 @@ app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) 
   const note = String(b.note || '').trim().slice(0, 4000);
   if (!DECISIONS[d]) return res.status(400).json({ error: 'Choose one resolution.' });
   if (note.length < 5) return res.status(400).json({ error: 'Add a short reviewer note.' });
+  const drop = d === 'cancel_package' ? dropPlan(o) : null;
+  if (drop && !drop.ok) return res.status(400).json({ error: drop.why });
   const c = readCorrections(b.corrections, o.record);
   if (c.errors.length) return res.status(400).json({ error: c.errors.join(' ') });
   const corrected = Object.keys(c.changes).length ? Object.assign({ order_id: o.record.order_id }, c.changes) : null;
@@ -799,6 +873,8 @@ app.post('/api/orders/:id/decide', need('desk', 'admin'), wrap(async (req, res) 
   await saveOrder(o);
   await runlog(o.id, 'opus', 'info', 'Decision sent to Opus and accepted', meta);
   o.review = review;
+  // The workflow records every decision as a hold, so the console runs the rest of the order itself.
+  if (drop && !o.reprocessedAs) await runWithoutModem(o, req.user);
   res.json({ order: toDetail(await refresh(o, true)) });
 }));
 

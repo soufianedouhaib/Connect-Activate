@@ -128,7 +128,8 @@ function runWorkflow(rec) {
     attempts_made: (packages[f0.failed_step] || {}).attempts || 0,
     completed_packages: Object.keys(packages).filter((k) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages[k].status) >= 0)
   };
-  const delay = 'Hi ' + first + ', we are sorry, your ' + os.brand + ' connection is taking a little longer than expected. A specialist is already working on it and we will update you as soon as it is sorted. Thank you for your patience.';
+  // The live delay notice, as the workflow drafts it for every decision (em dash and all).
+  const delay = first + ', we’re sorry—your ' + os.brand + ' connection is taking longer than expected. A specialist is working on it now.';
   // By default reproduce what the live run returns after the review: the delay-notice step passes
   // Hold Ctx on with only the keys its schema lists, so Record Hold writes blanks.
   const ctxAfter = process.env.MOCK_TRIM_HOLD === '0' ? holdCtx : { order_id: os.order_id };
@@ -182,7 +183,7 @@ function createMock() {
     // The off-platform node has no field list on its inputs, so the whole hold context arrives.
     const holdCtx = process.env.MOCK_FULL_INPUTS === '0' ? { order_id: os.order_id } : c.out.holdCtx;
     const exec = crypto.randomUUID();
-    c.exec = { id: exec, token: crypto.randomBytes(24).toString('base64url'), decided: null };
+    c.exec = { id: exec, token: crypto.randomBytes(24).toString('base64url'), decided: null, at: Date.now() };
     executions.set(exec, c);
     const self = 'http://localhost:' + (process.env.MOCK_PORT || 4100);
     const body = {
@@ -218,6 +219,9 @@ function createMock() {
     if (c.fail) return 'FAILED';
     if (c.out.held && process.env.MOCK_WEBHOOK_URL) {
       dispatch(c);
+      // MOCK_REVIEW_TIMEOUT_MS: the review step closes without a decision, like the live time limit.
+      if (!c.exec.decided && process.env.MOCK_REVIEW_TIMEOUT_MS && c.exec.at && Date.now() - c.exec.at > Number(process.env.MOCK_REVIEW_TIMEOUT_MS)) { c.exec.decided = -1; return 'COMPLETED'; }
+      if (c.exec.decided === -1) return 'COMPLETED';
       if (!c.exec.decided) return process.env.MOCK_WAIT_STATUS || 'IN_PROGRESS'; // real Opus reports IN_PROGRESS here
       return Date.now() - c.exec.decided < 1200 ? 'IN_PROGRESS' : 'COMPLETED';
     }
