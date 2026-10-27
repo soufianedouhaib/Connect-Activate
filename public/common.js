@@ -88,6 +88,8 @@
   function channel(c) { c = String(c || 'SMS').toUpperCase(); return c === 'EMAIL' ? 'Email' : c === 'SMS' ? 'SMS' : words(c); }
   // Let long emails break only after the @, never in the middle of a word.
   function email(s) { return esc(s).replace('@', '@<wbr>'); }
+  // Codes like BILL-023175 or LEGACY-FAST-100 must not break at their hyphens.
+  function nb(text) { return String(text == null ? '' : text).replace(/\b([A-Z0-9]+(?:-[A-Z0-9]+)+)\b/g, function (m) { return m.replace(/-/g, '\u2011'); }); }
   function money(cents) { return '$' + (Number(cents || 0) / 100).toFixed(2); }
   function words(code) { return String(code || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, function (c) { return c.toUpperCase(); }); }
 
@@ -99,6 +101,12 @@
     DISPATCH_SUPPORT: 'Dispatch Support',
     BILLING_OPS: 'Billing Ops',
     NETWORK_COORDINATION: 'Network Coordination'
+  };
+  var ERRORS = {
+    'BIL-101': 'Invalid billing account number', 'BIL-204': 'Plan code mismatch (retired or legacy code)', 'BIL-310': 'Payment method rejected',
+    'LOG-110': 'Delivery address unparseable', 'LOG-220': 'Out of stock at assigned warehouse', 'LOG-330': 'Carrier dispatch failure',
+    'PRV-410': 'Existing active service at premises', 'PRV-420': 'Address or LOC ID mismatch', 'PRV-430': 'No technician slot in requested window',
+    'SYS-900': 'No completion signal within window', 'XNT-777': 'Service class conflict (unmapped wholesale code)'
   };
   var DECISIONS = {
     reprocess: 'Reprocess',
@@ -273,8 +281,8 @@
   }
 
   window.CA = {
-    api: api, boot: boot, esc: esc, icon: icon, fmtDate: fmtDate, shortDate: shortDate, channel: channel, email: email, ago: ago, money: money, words: words,
+    api: api, boot: boot, esc: esc, icon: icon, fmtDate: fmtDate, shortDate: shortDate, channel: channel, email: email, nb: nb, ago: ago, money: money, words: words,
     pill: pill, outcomeLine: outcomeLine, modal: modal, toast: toast, initials: initials, MARK: MARK,
-    REASONS: REASONS, QUEUES: QUEUES, DECISIONS: DECISIONS
+    REASONS: REASONS, QUEUES: QUEUES, DECISIONS: DECISIONS, ERRORS: ERRORS
   };
 })();

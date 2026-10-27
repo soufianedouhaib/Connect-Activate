@@ -2,13 +2,15 @@
   'use strict';
   var esc = CA.esc, icon = CA.icon;
 
+  // Same categories as Overview and Reports (set on the server), one row per order number.
   var FILTERS = [
     { key: 'all', label: 'All', test: function () { return true; } },
-    { key: 'running', label: 'Running', test: function (o) { return o.stage === 'running' || o.stage === 'starting'; } },
-    { key: 'held', label: 'Held', test: function (o) { return o.stage === 'held' || o.stage === 'with_desk'; } },
-    { key: 'activated', label: 'Activated', test: function (o) { return o.stage === 'activated'; } },
-    { key: 'problem', label: 'Did not finish', test: function (o) { return ['failed', 'timed_out', 'cancelled', 'validation_gap'].indexOf(o.stage) >= 0; } },
-    { key: 'resubmitted', label: 'Reprocessed', test: function (o) { return !!o.reprocessOf; } }
+    { key: 'running', label: 'Running', test: function (o) { return o.category === 'running'; } },
+    { key: 'held', label: 'Held', test: function (o) { return o.category === 'held'; } },
+    { key: 'activated', label: 'Activated', test: function (o) { return o.category === 'activated'; } },
+    { key: 'cancelled', label: 'Cancelled', test: function (o) { return o.category === 'cancelled'; } },
+    { key: 'problem', label: 'Did not finish', test: function (o) { return o.category === 'problem'; } },
+    { key: 'fixed', label: 'Fixed automatically', test: function (o) { return o.autoFixed; } }
   ];
 
   CA.boot().then(function (me) {
@@ -46,9 +48,9 @@
         if (!state.q) return true;
         return [o.orderId, o.customer, o.customerId, o.planName, o.errorCode, o.activationReference, o.submittedBy].join(' ').toLowerCase().indexOf(state.q) >= 0;
       });
-      document.getElementById('count').textContent = list.length + ' of ' + state.orders.length;
+      document.getElementById('count').textContent = list.length + ' of ' + state.orders.length + (state.orders.length === 1 ? ' order' : ' orders');
       document.getElementById('rows').innerHTML = list.length ? list.map(function (o) {
-        var tags = (o.reprocessOf ? ' <span class="tag">Reprocessed</span>' : '') + (o.duplicateOf ? ' <span class="tag">Repeat</span>' : '');
+        var tags = (o.runs > 1 ? ' <span class="tag" title="Earlier runs are linked from the order page">' + o.runs + ' runs</span>' : '') + (o.autoFixed ? ' <span class="tag tag-ok">Fixed automatically</span>' : '');
         return '<tr class="clickable" data-id="' + esc(o.id) + '">' +
           '<td data-h="Order" class="id-cell"><a href="/order.html?id=' + encodeURIComponent(o.id) + '"><strong>' + esc(o.orderId) + '</strong></a>' + tags + '<span class="sub">' + esc(CA.shortDate(o.submittedAt)) + '</span></td>' +
           '<td data-h="Customer"><span class="nm">' + esc(o.customer) + '</span>' + '<span class="sub">' + esc(o.customerId) + '</span></td>' +
@@ -62,7 +64,7 @@
     var timer = null;
     function load() {
       CA.api('GET', '/api/orders').then(function (d) {
-        state.orders = d.orders; render();
+        state.orders = d.orders.filter(function (o) { return o.latest !== false; }); render();
         var active = d.orders.some(function (o) { return ['starting', 'running', 'with_desk'].indexOf(o.stage) >= 0; });
         clearTimeout(timer);
         if (active) timer = setTimeout(load, 5000);

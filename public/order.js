@@ -4,24 +4,24 @@
   var id = new URLSearchParams(location.search).get('id');
 
   var PKG_LABEL = { BILLING: 'Billing', LOGISTICS: 'Logistics', PROVISIONING: 'Provisioning' };
-  var PKG_NOTE = {
-    BILLING: 'Billing account and plan',
-    LOGISTICS: 'Modem shipment',
-    PROVISIONING: 'Network activation'
-  };
+  var PKG_NOTE = { BILLING: 'Billing account and plan', LOGISTICS: 'Modem shipment', PROVISIONING: 'Network activation' };
+  var TYPES = ['BILLING', 'LOGISTICS', 'PROVISIONING'];
 
   CA.boot().then(function (me) {
     var app = document.getElementById('app');
     var isDesk = me.user.role === 'desk' || me.user.role === 'admin';
-    var timer = null, tick = null, firstRender = true, decision = null, lastStage = null;
+    var timer = null, tick = null, firstRender = true, decision = null, lastStage = null, catalogue = null;
 
     if (!id) { app.innerHTML = '<div class="alert bad">No order selected. <a href="/">Back to orders</a>.</div>'; return; }
+    CA.api('GET', '/api/catalogue').then(function (c) { catalogue = c; }).catch(function () { /* modem names fall back to codes */ });
+
+    var FORM_IDS = ['note', 'c-loc', 'c-addr', 'c-modem', 'c-exist'];
+    function typingInForm() { return document.activeElement && FORM_IDS.indexOf(document.activeElement.id) >= 0; }
 
     function load(force) {
       CA.api('GET', '/api/orders/' + encodeURIComponent(id) + (force ? '?force=1' : '')).then(function (d) {
-        // Don't redraw under someone typing a note unless the order actually moved on.
-        var typing = document.activeElement && (document.activeElement.id === 'note' || document.activeElement.id === 'corr');
-        if (!typing || d.order.stage !== lastStage) render(d.order);
+        // Don't redraw under someone filling in the decision unless the order actually moved on.
+        if (!typingInForm() || d.order.stage !== lastStage) render(d.order);
         lastStage = d.order.stage;
         clearTimeout(timer);
         if (['starting', 'running', 'with_desk'].indexOf(d.order.stage) >= 0) timer = setTimeout(load, 4000);
@@ -30,40 +30,64 @@
       });
     }
 
+    function keepForm() {
+      var k = {};
+      FORM_IDS.forEach(function (f) { var el = document.getElementById(f); if (el) k[f] = el.type === 'checkbox' ? el.checked : el.value; });
+      var det = document.getElementById('c-more'); if (det) k.open = det.open;
+      return k;
+    }
+    function restoreForm(k) {
+      FORM_IDS.forEach(function (f) { var el = document.getElementById(f); if (el && f in k) { if (el.type === 'checkbox') el.checked = k[f]; else el.value = k[f]; } });
+      var det = document.getElementById('c-more'); if (det && k.open) det.open = true;
+    }
+
     function render(o) {
       var rec = o.record || {}, res = o.result || (o.review && o.review.facts) || {};
-      var keepCorr = document.getElementById('corr') ? document.getElementById('corr').value : '';
       var cust = rec.customer || {}, svc = rec.service || {}, plan = rec.plan || {}, modem = rec.modem || {};
-      // Keep what the reviewer is typing across auto-refreshes.
-      var keepNote = document.getElementById('note') ? document.getElementById('note').value : '';
+      var kept = keepForm();
 
       app.innerHTML =
         '<div class="page-head"><div><p class="crumb"><a href="/">Orders</a> / ' + esc(o.orderId) + '</p>' +
         '<h1>' + esc(o.orderId) + '</h1><p>' + esc(o.customer) + ' · ' + esc(plan.name || '') + ' · submitted by ' + esc(o.submittedBy) + ', ' + esc(CA.fmtDate(o.submittedAt, true)) + '</p></div>' +
-        '<div class="toolbar">' + CA.pill(o) +
+        '<div class="toolbar">' + CA.pill(o) + (o.autoFixed ? '<span class="pill ok plain">Fixed automatically</span>' : '') +
         (me.user.role === 'admin' ? '<a class="btn small" href="/system.html?run=' + encodeURIComponent(o.id) + '#runlogs">' + icon('file') + 'Run log</a><button class="btn small danger" type="button" id="del">Delete</button>' : '') +
         '</div></div>' +
         links(o) +
         '<div class="layout-main-side"><div class="stack">' + resultCard(o, res, rec) + pipelineCard(o, res, rec) + detailsCard(o, rec, cust, svc, plan, modem) + '</div>' +
-        '<div class="stack">' + deskCard(o, res) + timelineCard(o, res) + '</div></div>';
+        '<div class="stack">' + deskCard(o, res, rec) + timelineCard(o) + '</div></div>';
 
       wire(o);
-      if (document.getElementById('note') && keepNote) document.getElementById('note').value = keepNote;
-      if (document.getElementById('corr') && keepCorr) document.getElementById('corr').value = keepCorr;
+      restoreForm(kept);
       if (decision) { var r = document.querySelector('input[name="decision"][value="' + decision + '"]'); if (r) { r.checked = true; r.closest('.choice').classList.add('on'); } }
       startCountdown(o);
-      if (firstRender) { firstRender = false; document.title = o.orderId + ' · Connect & Activate'; }
+      if (firstRender) {
+        firstRender = false;
+        document.title = o.orderId + ' · Connect & Activate';
+        if (location.hash === '#decide') { var dk = document.getElementById('desk'); if (dk) setTimeout(function () { dk.scrollIntoView({ block: 'start' }); }, 50); }
+      }
     }
 
     function links(o) {
       var bits = [];
-      if (o.reprocessOf) bits.push('This run reprocesses an earlier held run. <a href="/order.html?id=' + encodeURIComponent(o.reprocessOf) + '">Open the original</a>.');
-      if (o.reprocessedAs) bits.push('This order was sent again for reprocessing. <a href="/order.html?id=' + encodeURIComponent(o.reprocessedAs) + '">Open the new run</a>.');
-      if (o.duplicateOf && !o.reprocessOf) bits.push('An order with the same order number was submitted before. <a href="/order.html?id=' + encodeURIComponent(o.duplicateOf) + '">Open the earlier one</a>; this repeat is left out of report totals.');
+      if (o.reprocessOf) bits.push('This run reprocesses an earlier held run' + (o.corrections && o.corrections.length ? ', with these changes: ' + esc(o.corrections.join('; ')) : '') + '. <a href="/order.html?id=' + encodeURIComponent(o.reprocessOf) + '">Open the first run</a>.');
+      if (o.reprocessedAs) bits.push('This order was sent again for processing. <a href="/order.html?id=' + encodeURIComponent(o.reprocessedAs) + '">Open the new run</a>.');
+      if (o.duplicateOf && !o.reprocessOf) bits.push('The same order number was submitted before. <a href="/order.html?id=' + encodeURIComponent(o.duplicateOf) + '">Open the earlier one</a>; reports count the order once, by its newest run.');
       return bits.length ? '<div class="alert info" style="margin-bottom:16px">' + bits.join(' ') + '</div>' : '';
     }
 
+    function pkgNames(list) { return (list || []).map(function (p) { return PKG_LABEL[p] || CA.words(p); }); }
+    function joinNames(list) { var n = pkgNames(list); return n.length > 1 ? n.slice(0, -1).join(', ') + ' and ' + n[n.length - 1] : (n[0] || ''); }
+    function fixes(o) { return (o.trace && o.trace.fixes) || []; }
+
     /* ---------------------------------------------------------- result */
+    function holdTiles(o, f) {
+      return '<div class="tiles">' +
+        tile('Error', f.primary_error_code ? '<span class="code-chip">' + esc(f.primary_error_code) + '</span>' : '—', true, o.errorText) +
+        tile('Why it was held', CA.REASONS[f.escalation_reason] || CA.words(f.escalation_reason) || '—') +
+        tile('Review queue', CA.QUEUES[f.review_queue] || CA.words(f.review_queue) || '—') +
+        tile('Attempts made', f.attempts_made == null || f.attempts_made === '' ? '—' : String(f.attempts_made)) + '</div>';
+    }
+
     function resultCard(o, res, rec) {
       var mode = (res.activation_mode || (String((rec.service || {}).tech_type).toUpperCase() === 'FTTP' ? 'TECHNICIAN' : 'REMOTE'));
       if (o.stage === 'starting' || o.stage === 'running') {
@@ -72,49 +96,48 @@
           (o.pollError ? '<p class="small" style="color:var(--bad);margin-top:6px">Last status check failed: ' + esc(o.pollError) + '</p>' : '') + '</div></div></section>';
       }
       if (o.stage === 'with_desk') {
-        var rv = o.review, f = (rv && rv.facts) || {};
-        var inConsole = rv && rv.status === 'open';
+        var rv = o.review;
         var sent = rv && rv.status === 'sent';
-        var facts = f.primary_error_code || f.escalation_reason || f.review_queue || f.attempts_made != null
-          ? '<div class="tiles">' +
-            tile('Error', f.primary_error_code ? '<span class="code-chip">' + esc(f.primary_error_code) + '</span>' : '—', true, o.errorText) +
-            tile('Why it was held', CA.REASONS[f.escalation_reason] || CA.words(f.escalation_reason) || '—') +
-            tile('Review queue', CA.QUEUES[f.review_queue] || CA.words(f.review_queue) || '—') +
-            tile('Attempts made', f.attempts_made == null ? '—' : String(f.attempts_made)) + '</div>'
-          : (rv ? '<p class="small muted" style="margin-top:12px">The review task arrived with only the order number; error details appear once the run finishes.</p>' : '');
+        var hasFacts = res.primary_error_code || res.escalation_reason || res.review_queue || res.attempts_made;
         return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('pause') + '</div><div><h2>Held · ' + (sent ? 'decision sent, finishing the run' : 'waiting on the Fallout Desk') + '</h2>' +
-          '<p>' + (sent ? 'The desk\'s decision was accepted by the workflow. The customer delay notice is being drafted and the result will appear here.'
-            : 'At least one package could not be completed automatically. The order is on hold and the responsible team has been alerted. ' + (inConsole ? 'The review task is here in the console — decide it in the Fallout Desk panel.' : 'Waiting for the review task to reach the console.')) + '</p>' +
-          (sent ? '' : '<p class="small muted" style="margin-top:8px">Time left in the review window: <span class="countdown" id="cd">—</span>.</p>') + '</div></div>' + facts + '</section>';
+          '<p>' + (sent ? 'The decision was accepted by the workflow. The customer notice is being drafted and the result will appear here.'
+            : (joinNames(res.held_packages) || 'A package') + ' could not be completed automatically. The order is on hold and the responsible team has been alerted. ' + (rv && rv.status === 'open' ? 'Decide it in the Fallout Desk panel on this page.' : 'The review task appears here within a few seconds.')) + '</p>' +
+          (sent ? '' : '<p class="small muted" style="margin-top:8px">Time left to decide: <span class="countdown" id="cd">—</span>.</p>') + '</div></div>' +
+          (hasFacts ? holdTiles(o, res) : '') + '</section>';
       }
       if (o.stage === 'activated' || o.stage === 'validation_gap') {
         var ok = o.stage === 'activated';
+        var rec2 = fixes(o).filter(function (f) { return f.recovered; });
+        var healed = rec2.length ? '<div class="alert ok" style="margin-top:16px"><strong>Recovered without a person</strong>' + rec2.map(function (f) {
+          return esc(CA.nb(PKG_LABEL[f.package] + ' failed with ' + f.errorCode + ' on attempt ' + f.attempt + '. ' + f.summary));
+        }).join('<br>') + '</div>' : '';
         return '<section class="card"><div class="result-hero ' + (ok ? 'ok' : 'bad') + '"><div class="mark">' + icon(ok ? 'checkCircle' : 'alert') + '</div><div>' +
-          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? 'All three packages completed, final validation passed and the order is closed. The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
+          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (rec2.length ? 'Every package completed after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
           '<div class="tiles">' +
           tile('Activation reference', res.activation_reference || 'Not returned') +
           tile('Plan', (res.plan_name || (rec.plan || {}).name || '—')) +
           tile('Speed', (res.speed_tier || (rec.plan || {}).speed_tier || 0) + ' Mbps') +
           tile('Activation', (res.tech_type || (rec.service || {}).tech_type || '') + ' · ' + (mode === 'TECHNICIAN' ? 'technician visit' : 'remote')) +
-          '</div>' + message(res.welcome_message, res.welcome_channel || (rec.customer || {}).preferred_channel, 'Welcome message', rec) + '</section>';
+          '</div>' + healed + message(res.welcome_message, res.welcome_channel || (rec.customer || {}).preferred_channel, 'Welcome message', rec) + '</section>';
+      }
+      if (o.stage === 'held' && o.category === 'cancelled') {
+        return '<section class="card"><div class="result-hero bad"><div class="mark">' + icon('x') + '</div><div>' +
+          '<h2>Order cancelled</h2><p>' + esc(joinNames(res.held_packages) || 'A package') + ' could not be completed' + (res.primary_error_code ? ' (' + CA.nb(res.primary_error_code) + ')' : '') + ', and the Fallout Desk cancelled the order' + (o.resolution ? ' on ' + esc(CA.fmtDate(o.resolution.at, true)) : '') + '.</p></div></div>' +
+          holdTiles(o, res) +
+          message(res.customer_message, res.customer_channel || (rec.customer || {}).preferred_channel, 'Customer notice', rec) +
+          '<p class="small muted" style="margin-top:8px">The workflow sends this same notice whatever the desk decides.</p></section>';
       }
       if (o.stage === 'held') {
-        var held = res.held_packages || [];
-        var reasonText = res.escalation_reason === 'RETRY_LIMIT' ? 'The package kept failing after ' + (res.attempts_made || 3) + ' attempts, including automatic fixes.' : res.escalation_reason === 'NO_SAFE_FIX' ? 'There is no safe automatic fix for this error, so it went straight to a person.' : '';
+        var reasonText = res.escalation_reason === 'RETRY_LIMIT' ? 'It kept failing after ' + (res.attempts_made || 3) + ' attempts, including automatic fixes.' : res.escalation_reason === 'NO_SAFE_FIX' ? 'There is no safe automatic fix for this error, so it went straight to a person.' : '';
         return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('alert') + '</div><div>' +
-          '<h2>Order held</h2><p>' + esc(held.map(function (p) { return PKG_LABEL[p] || p; }).join(' and ') || 'A package') + ' could not be completed. ' + esc(reasonText) + ' The customer has been sent a delay notice.</p></div></div>' +
-          '<div class="tiles">' +
-          tile('Error', res.primary_error_code ? '<span class="code-chip">' + esc(res.primary_error_code) + '</span>' : '—', true, o.errorText) +
-          tile('Why it was held', CA.REASONS[res.escalation_reason] || CA.words(res.escalation_reason) || '—') +
-          tile('Review queue', CA.QUEUES[res.review_queue] || CA.words(res.review_queue) || '—') +
-          tile('Attempts made', String(res.attempts_made == null ? '—' : res.attempts_made)) +
-          '</div>' +
+          '<h2>Order held</h2><p>' + esc(joinNames(res.held_packages) || 'A package') + ' could not be completed. ' + esc(reasonText) + ' The customer has been sent a delay notice.</p></div></div>' +
+          holdTiles(o, res) +
           ((res.escalated_fallout_ids || []).length ? '<p class="small muted" style="margin-top:12px">Fallout case' + (res.escalated_fallout_ids.length > 1 ? 's' : '') + ': ' + res.escalated_fallout_ids.map(function (f) { return '<span class="code-chip">' + esc(f) + '</span>'; }).join(' ') + '</p>' : '') +
           message(res.customer_message, res.customer_channel || (rec.customer || {}).preferred_channel, 'Customer delay notice', rec) + '</section>';
       }
       var title = o.stage === 'timed_out' ? 'The run timed out' : o.stage === 'cancelled' ? 'The run was cancelled' : 'The run did not finish';
       return '<section class="card"><div class="result-hero bad"><div class="mark">' + icon('x') + '</div><div><h2>' + title + '</h2>' +
-        '<p>' + esc(o.failure || 'Opus reported the run as ' + (o.opusStatus || 'failed') + '.') + '</p>' +
+        '<p>' + esc(o.failure || 'The workflow reported the run as ' + CA.words(o.opusStatus || 'failed') + '.') + '</p>' +
         (o.stage === 'timed_out' && o.waitingSince ? '<p class="small muted" style="margin-top:6px">The order was waiting on the Fallout Desk. The review step closes after ' + o.reviewWindowMinutes + ' minutes without a decision.</p>' : '') +
         '</div></div></section>';
     }
@@ -132,21 +155,39 @@
         '<div class="bubble' + (c === 'EMAIL' ? ' email' : '') + '">' + esc(text) + '<span class="count">' + text.length + ' characters</span></div></div>';
     }
 
-    /* ---------------------------------------------------------- pipeline */
+    /* ---------------------------------------------------------- packages */
+    function attemptsText(p, max) {
+      if (p.attempts == null || p.status === 'NOT_REQUIRED') return '';
+      if (p.status === 'COMPLETED') return p.attempts > 1 ? 'Succeeded on attempt ' + p.attempts + ' of ' + max : 'First attempt';
+      return 'Stopped after ' + p.attempts + ' attempt' + (p.attempts > 1 ? 's' : '');
+    }
+
+    /* What a package card shows. The Opus step log is the source when it was read;
+       otherwise the held or closed output decides. */
     function pkgState(o, res, rec, type) {
       var running = o.stage === 'running' || o.stage === 'starting';
+      var p = o.trace && o.trace.packages && o.trace.packages[type];
+      var max = (rec.retry_policy && rec.retry_policy.max_attempts) || 3;
       if (type === 'LOGISTICS' && !rec.include_modem) return { cls: 'ok', state: 'Not required', note: 'Customer keeps their own modem' };
-      if (running) return { cls: '', state: 'In progress', note: PKG_NOTE[type] };
-      if (o.stage === 'activated' || o.stage === 'validation_gap') return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
-      if (o.stage === 'held') {
-        if ((res.held_packages || []).indexOf(type) >= 0) return { cls: 'held', state: 'Escalated', note: res.primary_error_code ? res.primary_error_code + ' · ' + (o.errorText || '') : 'Needs a decision' };
-        if ((res.completed_packages || []).indexOf(type) >= 0) return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
-        return { cls: '', state: 'Not reported', note: PKG_NOTE[type] };
+      if (running && !p) return { cls: '', state: 'In progress', note: PKG_NOTE[type] };
+      if (p && p.status) {
+        var lines = [];
+        var at = attemptsText(p, max); if (at) lines.push(at);
+        if (p.reference) lines.push('Ref ' + p.reference);
+        var first = o.firstRunPackages && o.firstRunPackages[type];
+        if (first && first.reference && first.reference === p.reference) lines.push('same as the first run');
+        var f = p.fallout;
+        var fix = f && f.fixes.length ? f.fixes.map(function (x) { return x.summary; }).filter(Boolean).join(' ') : '';
+        if (p.status === 'COMPLETED') return { cls: 'ok', state: 'Completed', note: lines.join(' · ') || PKG_NOTE[type], fix: f && f.status === 'RESOLVED' ? (f.errorCode + ' fixed automatically. ' + fix) : '' };
+        if (p.status === 'NOT_REQUIRED') return { cls: 'ok', state: 'Not required', note: PKG_NOTE[type] };
+        var err = p.lastError || (f && f.errorCode) || '';
+        return { cls: 'held', state: 'Escalated', note: [err ? err + (CA.ERRORS[err] ? ' · ' + CA.ERRORS[err] : '') : ''].concat(lines).filter(Boolean).join(' · '), fix: fix ? 'Tried: ' + fix : '' };
       }
-      if (o.stage === 'with_desk') {
+      if (o.stage === 'activated' || o.stage === 'validation_gap') return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
+      if (o.stage === 'held' || o.stage === 'with_desk') {
         if ((res.held_packages || []).indexOf(type) >= 0) return { cls: 'held', state: 'Escalated', note: res.primary_error_code ? res.primary_error_code + ' · ' + (o.errorText || '') : 'Needs a decision' };
         if ((res.completed_packages || []).indexOf(type) >= 0) return { cls: 'ok', state: 'Completed', note: PKG_NOTE[type] };
-        return { cls: '', state: 'Awaiting review', note: 'Reported after the review' };
+        return { cls: '', state: o.stage === 'with_desk' ? 'Awaiting review' : 'Not reported', note: PKG_NOTE[type] };
       }
       return { cls: '', state: 'Not reported', note: 'The run stopped before reporting packages' };
     }
@@ -160,13 +201,20 @@
       var failed = ['failed', 'timed_out', 'cancelled'].indexOf(o.stage) >= 0;
       var closed = o.stage === 'activated' || o.stage === 'validation_gap';
       var held = o.stage === 'held' || o.stage === 'with_desk';
-      var pk = ['BILLING', 'LOGISTICS', 'PROVISIONING'].map(function (t) {
+      var pk = TYPES.map(function (t) {
         var s = pkgState(o, res, rec, t);
-        return '<div class="pkg ' + s.cls + '"><div class="p-name">' + PKG_LABEL[t] + '</div><div class="p-state">' + esc(s.state) + '</div><div class="p-note">' + esc(s.note) + '</div></div>';
+        return '<div class="pkg ' + s.cls + '"><div class="p-name">' + PKG_LABEL[t] + '</div><div class="p-state">' + esc(s.state) + '</div><div class="p-note">' + esc(CA.nb(s.note)) + '</div>' +
+          (s.fix ? '<div class="p-fix">' + esc(CA.nb(s.fix)) + '</div>' : '') + '</div>';
       }).join('');
+      var fx = fixes(o);
       var steps = [];
       steps.push(stage(failed && !o.caseRef ? 'bad' : 'done', 'check', 'Order received and standardised', 'Customer, service, plan and modem details put into one internal format.'));
       steps.push(stage(running ? 'now' : failed ? 'skip' : 'done', running ? 'split' : 'check', 'Split into work packages', 'Each package retries up to three times and applies safe automatic fixes.', '<div class="packages">' + pk + '</div>'));
+      if (fx.length) {
+        var recovered = fx.filter(function (f) { return f.recovered; });
+        steps.push(stage(recovered.length === fx.length ? 'done' : 'held', 'refresh', recovered.length === fx.length ? 'Fixed automatically' : 'Automatic fixes tried',
+          fx.map(function (f) { return esc(CA.nb(PKG_LABEL[f.package] + ', attempt ' + f.attempt + ': ' + f.summary + (f.recovered ? ' The next attempt succeeded.' : ''))); }).join('<br>')));
+      }
       if (running || failed) {
         steps.push(stage('skip', 'clock', 'Results combined', ''));
         steps.push(stage(failed ? 'bad' : 'skip', failed ? 'x' : 'clock', failed ? 'Stopped' : 'Close or hold', failed ? esc(o.failure || '') : ''));
@@ -177,21 +225,30 @@
         steps.push(stage(o.stage === 'activated' ? 'done' : 'bad', o.stage === 'activated' ? 'checkCircle' : 'alert', o.stage === 'activated' ? 'Order closed · active' : 'Order closed with a validation gap', res.activation_reference ? 'Activation reference ' + esc(res.activation_reference) + '.' : ''));
       } else if (held) {
         var waiting = o.stage === 'with_desk';
-        steps.push(stage('held', 'alert', 'Results combined · held', waiting ? 'At least one package was escalated.' : esc((res.held_packages || []).map(function (p) { return PKG_LABEL[p] || p; }).join(', ')) + ' escalated.'));
-        steps.push(stage('held', 'send', 'Team alerted', waiting ? 'The responsible queue was messaged in team chat.' : esc(CA.QUEUES[res.review_queue] || res.review_queue || 'The responsible queue') + ' was messaged in team chat.'));
-        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open — reprocess, cancel the package or cancel the order.') : (o.resolution ? (o.resolution.sentToOpus ? 'Decided in the console: ' : 'Recorded here: ') + esc(o.resolution.label) + '.' : 'Decided in Opus; no resolution recorded here yet.')));
-        steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer delay notice', waiting ? '' : 'Sent by ' + esc(CA.channel(res.customer_channel)) + '.'));
-        steps.push(stage(waiting ? 'skip' : 'held', waiting ? 'clock' : 'pause', 'Hold recorded', waiting ? '' : 'The order stays on hold until it is reprocessed or cancelled.'));
+        var names = joinNames(res.held_packages);
+        var queue = CA.QUEUES[res.review_queue] || CA.words(res.review_queue);
+        steps.push(stage('held', 'alert', 'Results combined · held', esc(names ? names + ' escalated.' : 'A package was escalated.')));
+        steps.push(stage('held', 'send', 'Team alerted', esc((queue || 'The responsible queue') + ' was messaged in team chat.')));
+        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open — reprocess, cancel the package or cancel the order.') : (o.resolution ? 'Decided: ' + esc(o.resolution.label) + '.' : 'The review step closed without a decision from the console.')));
+        steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer notice', waiting ? '' : 'Delay notice sent by ' + esc(CA.channel(res.customer_channel)) + '.'));
+        var dec = o.resolution && o.resolution.decision;
+        if (waiting) steps.push(stage('skip', 'clock', 'Hold recorded', ''));
+        else if (dec === 'cancel_order') steps.push(stage('bad', 'x', 'Order cancelled', 'The workflow records the order as held; the Fallout Desk cancelled it.'));
+        else if (dec === 'cancel_package') steps.push(stage('held', 'pause', 'Hold recorded · package cancelled', 'The failing package was cancelled; the rest of the order stays on hold.'));
+        else steps.push(stage('held', 'pause', 'Hold recorded', o.reprocessedAs ? 'The order was sent again for processing.' : 'The order stays on hold until it is sent again or cancelled.'));
       }
-      return '<section class="card"><div class="card-head"><div><h2>How the order moved</h2><p>The workflow\'s steps for this order.</p></div></div><div class="pipeline">' + steps.join('') + '</div></section>';
+      return '<section class="card"><div class="card-head"><div><h2>How the order moved</h2><p>The workflow\'s steps for this order' + (o.trace ? ', from the step log of this run' : '') + '.</p></div></div><div class="pipeline">' + steps.join('') + '</div></section>';
     }
 
     /* ---------------------------------------------------------- details */
     function detailsCard(o, rec, cust, svc, plan, modem) {
       function kv(rows) { return '<dl class="kv">' + rows.filter(function (r) { return r[1] !== undefined && r[1] !== ''; }).map(function (r) { return '<dt>' + esc(r[0]) + '</dt><dd>' + (r[2] ? r[1] : esc(r[1])) + '</dd>'; }).join('') + '</dl>'; }
+      var billed = o.trace && o.trace.packages && o.trace.packages.BILLING && o.trace.packages.BILLING.payload && o.trace.packages.BILLING.payload.plan_code;
+      var planCell = esc(plan.name || '') + (plan.plan_code ? ' <span class="nowrap">(' + esc(plan.plan_code) + ')</span>' : '');
+      if (billed && plan.plan_code && billed !== plan.plan_code) planCell += '<span class="sub-line">Billed as ' + esc(CA.nb(billed)) + ' after the automatic fix</span>';
       return '<section class="card"><div class="card-head"><div><h2>Order details</h2><p>What was sent to the workflow.</p></div><div class="toolbar">' +
         '<button class="btn small" type="button" id="show-rec">' + icon('file') + 'Order record</button>' +
-        (o.result && isDesk ? '<button class="btn small" type="button" id="show-out">' + icon('file') + 'Workflow output</button>' : '') + '</div></div>' +
+        (o.outputRaw ? '<button class="btn small" type="button" id="show-out">' + icon('file') + 'Workflow output</button>' : '') + '</div></div>' +
         '<div class="grid-2"><div><h3 class="section-title">Customer</h3>' + kv([
           ['Name', o.customer], ['Customer ID', cust.customer_id], ['Mobile', cust.mobile], ['Email', CA.email(cust.email), true],
           ['Prefers', CA.channel(cust.preferred_channel)], ['Service address', cust.service_address],
@@ -199,19 +256,48 @@
         ]) + '</div><div><h3 class="section-title">Service and plan</h3>' + kv([
           ['LOC ID', '<span class="code-chip">' + esc(svc.loc_id) + '</span>', true], ['Technology', svc.tech_type + (svc.max_speed_tier ? ' · up to ' + svc.max_speed_tier + ' Mbps' : '')],
           ['Active service there', svc.existing_active_service ? 'Yes' : 'No'],
-          ['Plan', esc(plan.name || '') + (plan.plan_code ? ' <span class="nowrap">(' + esc(plan.plan_code) + ')</span>' : ''), true], ['Price', plan.monthly_price_cents ? CA.money(plan.monthly_price_cents) + ' a month' : ''],
+          ['Plan', planCell, true], ['Price', plan.monthly_price_cents ? CA.money(plan.monthly_price_cents) + ' a month' : ''],
           ['Modem', rec.include_modem ? (modem.name || modem.sku) + ' · from ' + (modem.assigned_warehouse === 'WH-SOUTH' ? 'South' : 'North') + ' warehouse' : 'Customer keeps their own'],
           ['Payment', CA.words(rec.payment_preference)]
         ]) + '</div></div>' +
-        ((rec.fault_rules || []).length ? '<p class="small muted" style="margin-top:14px">This order carries ' + rec.fault_rules.length + ' simulated fault rule' + (rec.fault_rules.length > 1 ? 's' : '') + ' (' + rec.fault_rules.map(function (r) { return esc(r.error_code); }).join(', ') + ') used to demonstrate fallout handling.</p>' : '') +
+        ((rec.fault_rules || []).length ? '<p class="small muted" style="margin-top:14px">This example carries ' + rec.fault_rules.length + ' simulated fault' + (rec.fault_rules.length > 1 ? 's' : '') + ' (' + rec.fault_rules.map(function (r) { return esc(r.error_code); }).join(', ') + ') to show how the workflow handles it.</p>' : '') +
         '</section>';
     }
 
-    /* ---------------------------------------------------------- side */
-    function deskCard(o, res) {
+    /* ---------------------------------------------------------- Fallout Desk */
+    function correctionFields(o, rec) {
+      var svc = rec.service || {}, cust = rec.customer || {}, modem = rec.modem || {};
+      var modems = (catalogue && catalogue.modems) || { 'MDM-G3': 'Orbit Smart Modem Gen 3', 'MDM-G2': 'Orbit Smart Modem Gen 2' };
+      return '<div class="form-grid one">' +
+        '<label class="field"><span>LOC ID</span><input type="text" id="c-loc" value="' + esc(svc.loc_id || '') + '" spellcheck="false" autocomplete="off"></label>' +
+        '<label class="field"><span>Delivery address</span><input type="text" id="c-addr" value="' + esc(cust.delivery_address || cust.service_address || '') + '" autocomplete="off"></label>' +
+        (rec.include_modem ? '<label class="field"><span>Modem</span><select id="c-modem">' + Object.keys(modems).map(function (k) { return '<option value="' + esc(k) + '"' + (k === modem.sku ? ' selected' : '') + '>' + esc(modems[k]) + '</option>'; }).join('') + '</select></label>' : '') +
+        '<label class="check"><input type="checkbox" id="c-exist"' + (svc.existing_active_service ? ' checked' : '') + '> There is still an active service at the address</label>' +
+        '</div>';
+    }
+    function readCorrectionFields() {
+      var c = {};
+      var loc = document.getElementById('c-loc'), addr = document.getElementById('c-addr'), mdm = document.getElementById('c-modem'), ex = document.getElementById('c-exist');
+      if (loc) c.loc_id = loc.value;
+      if (addr) c.delivery_address = addr.value;
+      if (mdm) c.modem_sku = mdm.value;
+      if (ex) c.existing_active_service = ex.checked;
+      return c;
+    }
+    function correctionsText(c) {
+      if (!c) return '';
+      var bits = [];
+      if (c.loc_id) bits.push('LOC ID ' + c.loc_id);
+      if (c.delivery_address) bits.push('delivery address ' + c.delivery_address);
+      if (c.modem_sku) bits.push('modem ' + c.modem_sku);
+      if (typeof c.existing_active_service === 'boolean') bits.push(c.existing_active_service ? 'active service at the address' : 'no active service at the address');
+      return bits.join('; ');
+    }
+
+    function deskCard(o, res, rec) {
       if (o.stage !== 'held' && o.stage !== 'with_desk') return '';
-      var head = '<section class="card"><div class="card-head"><div><h2>Fallout Desk</h2><p>' + esc(CA.QUEUES[res.review_queue] || 'Dispatch Support') + ' decides how to resolve the hold.</p></div></div>';
-      var opusLink = '<a class="btn small" href="' + esc(me.opusReviewUrl) + '" target="_blank" rel="noopener">' + icon('external') + 'Open Opus reviews</a>';
+      var queue = CA.QUEUES[res.review_queue] || CA.words(res.review_queue);
+      var head = '<section class="card" id="desk"><div class="card-head"><div><h2>Fallout Desk</h2><p>' + esc(queue ? queue + ' decides how to resolve the hold.' : 'Decide how to resolve the hold.') + '</p></div></div>';
       var rv = o.review;
       if (rv && rv.status === 'open' && !o.resolution) {
         if (!isDesk) return head + '<p class="small">The desk is reviewing this order now.</p></section>';
@@ -222,45 +308,40 @@
           choice('cancel_package', 'Cancel the affected package', 'Keep the rest of the order, drop the failing part.') +
           choice('cancel_order', 'Cancel the entire order', 'Stop the order and tell the customer.') + '</div>' +
           '<label class="field" style="margin-top:12px"><span>Reviewer note</span><textarea id="note" placeholder="What you found and why you chose this resolution."></textarea></label>' +
-          (rv.outputs.indexOf('corrected_payload') >= 0 || !rv.outputs.length ? '<details style="margin-top:10px"><summary class="small" style="cursor:pointer;color:var(--brand-ink)">Add corrected details (optional)</summary>' +
-            '<textarea class="code" id="corr" spellcheck="false" style="min-height:140px;margin-top:8px" placeholder="{ &quot;order_id&quot;: &quot;' + esc(o.orderId) + '&quot;, … }"></textarea><p class="hint">Only when reprocessing needs changed details. Must be a JSON object.</p></details>' : '') +
+          '<details id="c-more" style="margin-top:10px"><summary class="small" style="cursor:pointer;color:var(--brand-ink)">Correct the order details (optional)</summary>' +
+          '<p class="hint" style="margin:8px 0 10px">Change only what caused the hold. The corrections travel with the decision and are filled in when the order is sent again.</p>' + correctionFields(o, rec) + '</details>' +
           '<div id="d-err" class="alert bad" hidden style="margin-top:10px"></div>' +
           '<button class="btn primary block" type="button" id="send" style="margin-top:12px">' + icon('send') + 'Send decision</button></section>';
       }
-      if (rv && rv.status === 'closed' && !o.resolution && isDesk) {
-        head += '<div class="alert warn" style="margin-bottom:12px">' + esc(rv.error || 'This review task is closed in Opus.') + '</div>';
-      }
       if (o.resolution) {
-        return head + '<dl class="kv"><dt>Resolution</dt><dd><strong>' + esc(o.resolution.label) + '</strong></dd><dt>Note</dt><dd>' + esc(o.resolution.note) + '</dd><dt>' + (o.resolution.sentToOpus ? 'Decided by' : 'Recorded by') + '</dt><dd>' + esc(o.resolution.by) + ', ' + esc(CA.fmtDate(o.resolution.at, true)) + '</dd>' +
-          (o.resolution.sentToOpus ? '<dt>Workflow</dt><dd><span class="pill ok">Accepted by Opus</span></dd>' : '') + '</dl>' +
-          (isDesk && o.stage === 'held' && !o.reprocessedAs ? '<div class="toolbar" style="margin-top:14px"><button class="btn small" type="button" id="reproc">' + icon('refresh') + 'Send again for processing</button></div>' : '') + '</section>';
+        var corr = correctionsText(o.resolutionCorrections);
+        return head + '<dl class="kv"><dt>Resolution</dt><dd><strong>' + esc(o.resolution.label) + '</strong></dd><dt>Note</dt><dd>' + esc(o.resolution.note) + '</dd>' +
+          (corr ? '<dt>Corrections</dt><dd>' + esc(corr) + '</dd>' : '') +
+          '<dt>Decided by</dt><dd>' + esc(o.resolution.by) + ', ' + esc(CA.fmtDate(o.resolution.at, true)) + '</dd>' +
+          (o.resolution.sentToOpus ? '<dt>Workflow</dt><dd><span class="pill ok">Accepted by the workflow</span></dd>' : '') + '</dl>' +
+          (isDesk && o.stage === 'held' && !o.reprocessedAs && o.resolution.decision !== 'cancel_order' ? '<div class="toolbar" style="margin-top:14px"><button class="btn small" type="button" id="reproc">' + icon('refresh') + 'Send again for processing</button></div>' : '') + '</section>';
       }
-      if (!isDesk) {
-        return head + '<p class="small">' + (o.stage === 'with_desk' ? 'The desk is reviewing this order now.' : 'No resolution has been recorded yet.') + '</p></section>';
-      }
-      if (o.stage === 'with_desk' && me.webhookMode && !(rv && rv.status === 'closed')) {
-        return head + '<p class="small">Waiting for the review task to arrive from the workflow. It usually comes within a few seconds of the hold; the decision panel appears here when it does.</p></section>';
-      }
-      var intro = o.stage === 'with_desk'
-        ? '<div class="alert warn" style="margin-bottom:14px"><strong>Decide in Opus first</strong>The review step is a task in Opus. Choose the resolution there; you can note it here at the same time.</div>'
-        : '<p class="small muted" style="margin-bottom:12px">The workflow does not return the reviewer\'s choice, so record it here to keep the order history and reports complete.</p>';
-      return head + intro +
-        '<div class="toolbar" style="margin-bottom:14px">' + opusLink + '</div>' +
+      if (!isDesk) return head + '<p class="small">' + (o.stage === 'with_desk' ? 'The desk is reviewing this order now.' : 'No decision has been recorded.') + '</p></section>';
+      if (o.stage === 'with_desk') return head + '<p class="small">Waiting for the review task to arrive from the workflow. It usually comes within a few seconds of the hold; the decision panel appears here when it does.</p></section>';
+      // Held, and the review step closed without a decision from the console.
+      return head +
+        '<div class="alert warn" style="margin-bottom:12px">' + esc((rv && rv.error) || 'The review step closed before a decision was sent.') + ' Record what was decided so the order history and reports are complete.</div>' +
         '<div class="choices" role="radiogroup" aria-label="Resolution">' +
         choice('reprocess', 'Reprocess the order', 'Fix what is needed and run it again.') +
         choice('cancel_package', 'Cancel the affected package', 'Keep the rest of the order, drop the failing part.') +
         choice('cancel_order', 'Cancel the entire order', 'Stop the order and tell the customer.') + '</div>' +
         '<label class="field" style="margin-top:12px"><span>Reviewer note</span><textarea id="note" placeholder="What you found and why you chose this resolution."></textarea></label>' +
         '<div id="d-err" class="alert bad" hidden style="margin-top:10px"></div>' +
-        '<button class="btn primary block" type="button" id="record" style="margin-top:12px">Record resolution</button></section>';
+        '<button class="btn primary block" type="button" id="record" style="margin-top:12px">Record decision</button></section>';
     }
     function choice(v, t, s) {
       return '<label class="choice"><input type="radio" name="decision" value="' + v + '"><div><b>' + esc(t) + '</b><span>' + esc(s) + '</span></div></label>';
     }
 
-    function timelineCard(o, res) {
+    function timelineCard(o) {
       var rows = [['Submitted', CA.fmtDate(o.submittedAt, true) + ' by ' + o.submittedBy]];
       if (o.waitingSince) rows.push(['Held for review', CA.fmtDate(o.waitingSince, true)]);
+      if (o.resolution) rows.push(['Decided', CA.fmtDate(o.resolution.at, true) + ' by ' + o.resolution.by]);
       if (o.finishedAt) rows.push(['Finished', CA.fmtDate(o.finishedAt, true)]);
       if (o.finishedAt && o.submittedAt) {
         var s = Math.round((Date.parse(o.finishedAt) - Date.parse(o.submittedAt)) / 1000);
@@ -277,20 +358,25 @@
         CA.modal('Order record', '<pre class="json">' + esc(JSON.stringify(o.record, null, 2)) + '</pre>', '<button class="btn" type="button" data-close>Close</button>');
       });
       if ((el = document.getElementById('show-out'))) el.addEventListener('click', function () {
-        CA.modal('Workflow output', '<p class="muted small" style="margin-bottom:10px">' + (o.path === 'held' ? 'Held-order state, from the Record Hold step.' : 'Order state, from the Close Order step.') + '</p><pre class="json">' + esc(JSON.stringify(o.result, null, 2)) + '</pre>', '<button class="btn" type="button" data-close>Close</button>');
+        var note = (o.path === 'held' ? 'Held-order state, from the Record Hold step.' : 'Order state, from the Close Order step.') +
+          (o.filledFromRun && o.filledFromRun.length ? ' Some fields came back empty here; the page fills them from earlier in the same run (the hold step and the review task).' : '');
+        CA.modal('Workflow output', '<p class="muted small" style="margin-bottom:10px">' + esc(note) + '</p><pre class="json">' + esc(JSON.stringify(o.outputRaw, null, 2)) + '</pre>', '<button class="btn" type="button" data-close>Close</button>');
       });
       Array.prototype.forEach.call(document.querySelectorAll('input[name="decision"]'), function (r) {
         r.addEventListener('change', function () {
           decision = r.value;
           Array.prototype.forEach.call(document.querySelectorAll('.choice'), function (c) { c.classList.toggle('on', c.contains(r)); });
+          var more = document.getElementById('c-more'); if (more && r.value === 'reprocess') more.open = true;
         });
       });
+      var deskEl = document.getElementById('desk');
+      if (deskEl) deskEl.addEventListener('input', function () { var er = document.getElementById('d-err'); if (er) er.hidden = true; });
       if ((el = document.getElementById('record'))) el.addEventListener('click', function () {
         var err = document.getElementById('d-err'); err.hidden = true;
         var pick = document.querySelector('input[name="decision"]:checked');
         if (!pick) { err.textContent = 'Choose one resolution.'; err.hidden = false; return; }
         CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/resolution', { decision: pick.value, note: document.getElementById('note').value })
-          .then(function (d) { decision = null; document.getElementById('note').value = ''; render(d.order); CA.toast('Resolution recorded.'); })
+          .then(function (d) { decision = null; document.getElementById('note').value = ''; render(d.order); CA.toast('Decision recorded.'); })
           .catch(function (e) { err.textContent = e.message; err.hidden = false; });
       });
       if ((el = document.getElementById('send'))) el.addEventListener('click', function () {
@@ -298,14 +384,15 @@
         var pick = document.querySelector('input[name="decision"]:checked');
         if (!pick) { err.textContent = 'Choose one resolution.'; err.hidden = false; return; }
         var btn = this; btn.disabled = true; btn.textContent = 'Sending…';
-        var corr = document.getElementById('corr');
-        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/decide', { decision: pick.value, note: document.getElementById('note').value, correctedText: corr ? corr.value : '' })
+        var more = document.getElementById('c-more');
+        var body = { decision: pick.value, note: document.getElementById('note').value, corrections: more && more.open ? readCorrectionFields() : {} };
+        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/decide', body)
           .then(function (d) { decision = null; render(d.order); CA.toast('Decision sent to the workflow.'); clearTimeout(timer); timer = setTimeout(load, 3000); })
           .catch(function (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; btn.innerHTML = icon('send') + 'Send decision'; });
       });
       if ((el = document.getElementById('reproc'))) el.addEventListener('click', function () { reprocess(o); });
       if ((el = document.getElementById('del'))) el.addEventListener('click', function () {
-        var m = CA.modal('Delete this order?', '<p>' + esc(o.orderId) + ' will be removed from the console and from report totals. The run in Opus is not affected, and its run log is kept.</p>',
+        var m = CA.modal('Delete this order?', '<p>' + esc(o.orderId) + ' will be removed from the console and from report totals. The run in the workflow is not affected, and its run log is kept.</p>',
           '<button class="btn" type="button" data-close>Keep it</button><button class="btn danger" type="button" id="del-yes">Delete</button>');
         m.el.querySelector('#del-yes').addEventListener('click', function () {
           CA.api('DELETE', '/api/orders/' + encodeURIComponent(o.id)).then(function () { location.href = '/'; }).catch(function (e) { CA.toast(e.message, 'bad'); });
@@ -314,14 +401,31 @@
     }
 
     function reprocess(o) {
+      var rec = o.record || {};
+      var res = o.result || {};
+      var pre = Object.assign({}, o.resolutionCorrections || {});
+      var temp = JSON.parse(JSON.stringify(rec));
+      if (pre.loc_id) temp.service.loc_id = pre.loc_id;
+      if (pre.delivery_address) temp.customer.delivery_address = pre.delivery_address;
+      if (pre.modem_sku) temp.modem.sku = pre.modem_sku;
+      if (typeof pre.existing_active_service === 'boolean') temp.service.existing_active_service = pre.existing_active_service;
+      var faults = (rec.fault_rules || []).map(function (f) { return f.package; }).filter(function (p, i, a) { return a.indexOf(p) === i; });
+      var heldPk = res.held_packages || [];
       var m = CA.modal('Send the order again',
-        '<p style="margin-bottom:10px">A new run starts with the order record below. Correct anything that caused the hold first — for example a delivery address or LOC ID. Simulated fault rules stay as they are unless you change them.</p>' +
-        '<textarea class="code" id="rp-text" spellcheck="false">' + esc(JSON.stringify(o.record, null, 2)) + '</textarea><div id="rp-err" class="alert bad" hidden style="margin-top:10px"></div>',
+        '<p style="margin-bottom:12px">A new run starts with these details. Correct what caused the hold' + (pre && Object.keys(pre).length ? ' — the corrections from the decision are already filled in' : '') + '.</p>' +
+        correctionFields(o, temp) +
+        (faults.length ? '<div style="margin-top:14px"><h3 class="section-title">Simulated faults in this example</h3>' + faults.map(function (p) {
+          return '<label class="check" style="margin-bottom:6px"><input type="checkbox" class="rp-clear" value="' + esc(p) + '"' + (heldPk.indexOf(p) >= 0 ? ' checked' : '') + '> Clear the ' + esc(PKG_LABEL[p].toLowerCase()) + ' fault, as the correction fixes it</label>';
+        }).join('') + '</div>' : '') +
+        '<p class="hint" style="margin-top:10px">All three packages run again in the new run; packages that completed before get the same references, because references are built from the order number.</p>' +
+        (me.user.role === 'admin' ? '<details style="margin-top:12px"><summary class="small" style="cursor:pointer;color:var(--brand-ink)">Edit the full order record instead (admin)</summary><textarea class="code" id="rp-text" spellcheck="false" style="margin-top:8px">' + esc(JSON.stringify(rec, null, 2)) + '</textarea></details>' : '') +
+        '<div id="rp-err" class="alert bad" hidden style="margin-top:10px"></div>',
         '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="button" id="rp-go">' + icon('refresh') + 'Start new run</button>');
       m.el.querySelector('#rp-go').addEventListener('click', function () {
-        var txt = m.el.querySelector('#rp-text').value;
-        var changed = txt.trim() !== JSON.stringify(o.record, null, 2).trim();
-        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/resubmit', changed ? { recordText: txt } : {})
+        var body = { corrections: readCorrectionFields(), clearFaults: Array.prototype.map.call(m.el.querySelectorAll('.rp-clear:checked'), function (c) { return c.value; }) };
+        var txt = m.el.querySelector('#rp-text');
+        if (txt && txt.closest('details').open && txt.value.trim() !== JSON.stringify(rec, null, 2).trim()) body = { recordText: txt.value };
+        CA.api('POST', '/api/orders/' + encodeURIComponent(o.id) + '/resubmit', body)
           .then(function (d) { location.href = '/order.html?id=' + encodeURIComponent(d.order.id); })
           .catch(function (e) { var er = m.el.querySelector('#rp-err'); er.textContent = e.message; er.hidden = false; });
       });
@@ -334,7 +438,7 @@
       var end = Date.parse(o.waitingSince) + o.reviewWindowMinutes * 60000;
       function upd() {
         var left = Math.max(0, Math.round((end - Date.now()) / 1000));
-        cd.textContent = left ? Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') : 'closing — Opus may time the run out';
+        cd.textContent = left ? Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') : 'closing — the workflow may time the run out';
       }
       upd(); tick = setInterval(upd, 1000);
     }

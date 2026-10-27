@@ -4,7 +4,7 @@
   var SERIES = [
     { key: 'activated', label: 'Activated', color: 'var(--series-a)' },
     { key: 'held', label: 'Held', color: 'var(--series-b)' },
-    { key: 'other', label: 'Other (running, gap or not finished)', color: 'var(--series-c)' }
+    { key: 'other', label: 'Cancelled, running or did not finish', color: 'var(--series-c)' }
   ];
 
   CA.boot().then(function (me) {
@@ -26,9 +26,8 @@
     function render(r) {
       month = r.month;
       document.getElementById('month').innerHTML = r.months.map(function (m) { return '<option value="' + m + '"' + (m === r.month ? ' selected' : '') + '>' + esc(monthName(m)) + '</option>'; }).join('');
-      document.getElementById('scope').textContent = (r.scope === 'mine' ? 'Your orders' : 'All orders') + ' submitted in ' + monthName(r.month) + '. Repeat submissions of the same order number are counted once.';
+      document.getElementById('scope').textContent = (r.scope === 'mine' ? 'Your orders' : 'All orders') + ' in ' + monthName(r.month) + '. Each order counts once, by its newest run, so an order sent again is not counted twice.';
       var t = r.totals;
-      var finished = t.activated + t.held + t.validationGap;
       var other = t.submitted - t.activated - t.held;
       var body = document.getElementById('body');
       if (!t.submitted) {
@@ -40,26 +39,28 @@
         '<div class="kpis" style="margin-bottom:0">' +
         kpi('Orders submitted', t.submitted, [t.inFlight ? t.inFlight + ' running' : '', t.failed ? t.failed + ' did not finish' : ''].filter(Boolean).join(' · ') || 'all reached an outcome', '') +
         kpi('Activated', pct(t.activated, t.submitted), t.activated + ' of ' + t.submitted + ' submitted', 'ok') +
-        kpi('Held for the Fallout Desk', t.held, t.resolved + ' with a resolution recorded', t.held ? 'warn' : '') +
-        kpi('Attempts before a hold', t.held ? t.avgAttemptsHeld : '—', 'average per held order', '') + '</div>' +
+        kpi('Held now', t.held, (t.heldAtSomePoint ? t.heldAtSomePoint + ' held at some point this month' : 'none held') + (t.awaitingDecision ? ' · ' + t.awaitingDecision + ' waiting' : ''), t.held ? 'warn' : '') +
+        kpi('Attempts before a hold', t.heldAtSomePoint ? t.avgAttemptsHeld : '—', t.heldAtSomePoint ? 'average over the ' + t.heldAtSomePoint + ' held this month' : 'nothing held this month', '') + '</div>' +
 
         '<section class="card"><div class="card-head"><div><h2>Outcomes</h2><p>Where this month\'s orders ended up.</p></div></div>' +
         legend() +
         '<div class="split" role="img" aria-label="' + esc(SERIES.map(function (s, i) { return s.label + ' ' + [t.activated, t.held, other][i]; }).join(', ')) + '">' +
         [t.activated, t.held, other].map(function (n, i) { return n ? '<span style="flex:' + n + ';background:' + SERIES[i].color + '" title="' + esc(SERIES[i].label + ': ' + n) + '"></span>' : ''; }).join('') + '</div>' +
         '<p class="small" style="margin-top:8px">' + SERIES.map(function (s, i) { var n = [t.activated, t.held, other][i]; return '<b>' + n + '</b> ' + esc(s.label.toLowerCase()) + ' (' + pct(n, t.submitted) + ')'; }).join(' · ') + '</p>' +
-        tableView(['Outcome', 'Orders', 'Share'], [['Activated', t.activated, pct(t.activated, t.submitted)], ['Held', t.held, pct(t.held, t.submitted)], ['Validation gap', t.validationGap, pct(t.validationGap, t.submitted)], ['Running', t.inFlight, pct(t.inFlight, t.submitted)], ['Did not finish', t.failed, pct(t.failed, t.submitted)]]) + '</section>' +
+        (t.autoFixed ? '<p class="small" style="margin-top:6px"><b>' + t.autoFixed + '</b> of the ' + t.activated + ' activated order' + (t.activated > 1 ? 's' : '') + ' recovered from a failure automatically, with no person involved.</p>' : '') +
+        tableView(['Outcome', 'Orders', 'Share'], [['Activated', t.activated, pct(t.activated, t.submitted)], ['  of which fixed automatically', t.autoFixed, pct(t.autoFixed, t.submitted)], ['Held', t.held, pct(t.held, t.submitted)], ['Cancelled at the Fallout Desk', t.cancelled, pct(t.cancelled, t.submitted)], ['Running', t.inFlight, pct(t.inFlight, t.submitted)], ['Did not finish', t.failed, pct(t.failed, t.submitted)]]) + '</section>' +
 
         '<section class="card"><div class="card-head"><div><h2>By day</h2><p>Orders submitted each day, by outcome. Hover a column for the figures.</p></div></div>' + legend() + daily(r.daily) +
         tableView(['Day', 'Activated', 'Held', 'Other'], r.daily.filter(function (d) { return d.activated + d.held + d.other; }).map(function (d) { return [CA.fmtDate(d.day), d.activated, d.held, d.other]; })) + '</section>' +
 
+        '<p class="small muted" style="margin:4px 2px 0">The next four charts cover every order held at some point this month (' + t.heldAtSomePoint + '), including orders sent again since.</p>' +
         '<div class="grid-2">' +
-        barsCard('Why orders were held', 'Error code on the first escalated package.', r.byErrorCode.map(function (x) { return { label: x.key, sub: x.text, n: x.count }; }), true, ['Error', 'Description', 'Held']) +
+                barsCard('Why orders were held', 'Error code on the first escalated package.', r.byErrorCode.map(function (x) { return { label: x.key, sub: x.text, n: x.count }; }), true, ['Error', 'Description', 'Held']) +
         barsCard('Review queue', 'Which team the hold was routed to.', r.byQueue.map(function (x) { return { label: CA.QUEUES[x.key] || x.key, n: x.count }; }), true, ['Queue', 'Held']) +
         barsCard('Escalation reason', 'Ran out of retries, or no safe automatic fix.', r.byReason.map(function (x) { return { label: CA.REASONS[x.key] || x.key, n: x.count }; }), true, ['Reason', 'Held']) +
-        barsCard('Fallout Desk resolutions', 'As recorded in the console.', r.byResolution.map(function (x) { return { label: CA.DECISIONS[x.key] || x.key, n: x.count }; }), true, ['Resolution', 'Held']) +
+        barsCard('Fallout Desk decisions', 'One per held order.', r.byResolution.map(function (x) { return { label: CA.DECISIONS[x.key] || x.key, n: x.count }; }), true, ['Resolution', 'Held']) +
         '</div>' +
-        barsCard('Finished orders by plan', '', r.byPlan.map(function (x) { return { label: x.key, n: x.count }; }), false, ['Plan', 'Orders']);
+        barsCard('Activated orders by plan', 'Adds up to the ' + t.activated + ' activated above.', r.byPlan.map(function (x) { return { label: x.key, n: x.count }; }), false, ['Plan', 'Orders']);
     }
 
     function kpi(label, value, sub, cls) {
