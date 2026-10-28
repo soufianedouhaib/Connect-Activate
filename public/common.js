@@ -55,7 +55,7 @@
         try { data = t ? JSON.parse(t) : {}; } catch (e) { data = null; }
         if (r.status === 401 && !/\/api\/login$/.test(url)) { location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search); throw new Error('Please sign in.'); }
         if (!r.ok) {
-          var msg = data && data.error ? data.error : 'The server answered ' + r.status + (data ? '' : ' (not JSON — the deployment may be missing the API files).');
+          var msg = data && data.error ? data.error : 'The server answered ' + r.status + (data ? '' : ' (not JSON, so the deployment may be missing the API files).');
           var err = new Error(msg); err.status = r.status; err.data = data; throw err;
         }
         if (data === null) throw new Error('The server answered with something that is not JSON.');
@@ -65,7 +65,7 @@
   }
 
   function fmtDate(iso, withTime) {
-    if (!iso) return '—';
+    if (!iso) return 'Not recorded';
     var d = new Date(iso);
     var opts = { day: 'numeric', month: 'short', year: 'numeric' };
     if (withTime) { opts.hour = '2-digit'; opts.minute = '2-digit'; }
@@ -80,7 +80,7 @@
     return Math.round(s / 86400) + ' d ago';
   }
   function shortDate(iso) {
-    if (!iso) return '—';
+    if (!iso) return 'Not recorded';
     var d = new Date(iso);
     var sameYear = d.getFullYear() === new Date().getFullYear();
     return d.toLocaleString(undefined, sameYear ? { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short', year: 'numeric' });
@@ -214,7 +214,7 @@
 
     if (!me.opusConnected) {
       var b = document.createElement('div'); b.className = 'setup-banner';
-      b.innerHTML = '<div class="inner"><b>Not connected to Opus yet.</b> Orders can be prepared, but they will not run until an admin finishes the connection' + (me.user.role === 'admin' ? ' — see <a href="/settings.html">Settings</a>.' : '.') + '</div>';
+      b.innerHTML = '<div class="inner"><b>Not connected to Opus yet.</b> Orders can be prepared, but they will not run until an admin finishes the connection' + (me.user.role === 'admin' ? '. See <a href="/settings.html">Settings</a>.' : '.') + '</div>';
       document.body.insertBefore(b, top.nextSibling);
     }
 
@@ -251,7 +251,7 @@
   }
 
   function helpDialog(me) {
-    var subject = encodeURIComponent('Connect & Activate console — help');
+    var subject = encodeURIComponent('Connect & Activate console: help');
     var body = encodeURIComponent('Hello,\n\nI need help with:\n\n\nSigned in as: ' + me.user.name + ' (' + me.user.roleLabel + ')\nPage: ' + location.pathname + location.search + '\nTime: ' + new Date().toISOString());
     modal('Get help',
       '<div class="stack"><p>Write to the Order Operations support team. The email opens with the page you are on and your account filled in, so they can find the order quickly.</p>' +

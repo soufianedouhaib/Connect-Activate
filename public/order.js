@@ -82,10 +82,10 @@
     /* ---------------------------------------------------------- result */
     function holdTiles(o, f) {
       return '<div class="tiles">' +
-        tile('Error', f.primary_error_code ? '<span class="code-chip">' + esc(f.primary_error_code) + '</span>' : '—', true, o.errorText) +
-        tile('Why it was held', CA.REASONS[f.escalation_reason] || CA.words(f.escalation_reason) || '—') +
-        tile('Review queue', CA.QUEUES[f.review_queue] || CA.words(f.review_queue) || '—') +
-        tile('Attempts made', f.attempts_made == null || f.attempts_made === '' ? '—' : String(f.attempts_made)) + '</div>';
+        tile('Error', f.primary_error_code ? '<span class="code-chip">' + esc(f.primary_error_code) + '</span>' : 'Not reported', true, o.errorText) +
+        tile('Why it was held', CA.REASONS[f.escalation_reason] || CA.words(f.escalation_reason) || 'Not reported') +
+        tile('Review queue', CA.QUEUES[f.review_queue] || CA.words(f.review_queue) || 'Not reported') +
+        tile('Attempts made', f.attempts_made == null || f.attempts_made === '' ? 'Not reported' : String(f.attempts_made)) + '</div>';
     }
 
     function resultCard(o, res, rec) {
@@ -102,7 +102,7 @@
         return '<section class="card"><div class="result-hero held"><div class="mark">' + icon('pause') + '</div><div><h2>Held · ' + (sent ? 'decision sent, finishing the run' : 'waiting on the Fallout Desk') + '</h2>' +
           '<p>' + (sent ? 'The decision was accepted by the workflow. The customer notice is being drafted and the result will appear here.'
             : (joinNames(res.held_packages) || 'A package') + ' could not be completed automatically. The order is on hold and the responsible team has been alerted. ' + (rv && rv.status === 'open' ? 'Decide it in the Fallout Desk panel on this page.' : 'The review task appears here within a few seconds.')) + '</p>' +
-          (sent ? '' : '<p class="small muted" style="margin-top:8px">Time left to decide: <span class="countdown" id="cd">—</span>.</p>') + '</div></div>' +
+          (sent ? '' : '<p class="small muted" style="margin-top:8px">Time left to decide: <span class="countdown" id="cd">calculating</span>.</p>') + '</div></div>' +
           (hasFacts ? holdTiles(o, res) : '') + '</section>';
       }
       if (o.stage === 'activated' || o.stage === 'validation_gap') {
@@ -115,7 +115,7 @@
           '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (o.droppedPackage === 'LOGISTICS' ? 'Billing and network activation completed, final validation passed and the order is closed. The modem shipment was dropped at the Fallout Desk, so no modem is sent.' : rec2.length ? 'Every package completed after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
           '<div class="tiles">' +
           tile('Activation reference', res.activation_reference || 'Not returned') +
-          tile('Plan', (res.plan_name || (rec.plan || {}).name || '—')) +
+          tile('Plan', (res.plan_name || (rec.plan || {}).name || 'Not reported')) +
           tile('Speed', (res.speed_tier || (rec.plan || {}).speed_tier || 0) + ' Mbps') +
           tile('Activation', (res.tech_type || (rec.service || {}).tech_type || '') + ' · ' + (mode === 'TECHNICIAN' ? 'technician visit' : 'remote')) +
           '</div>' + healed + message(res.welcome_message, res.welcome_channel || (rec.customer || {}).preferred_channel, 'Welcome message', rec) + '</section>';
@@ -247,7 +247,7 @@
         var queue = CA.QUEUES[res.review_queue] || CA.words(res.review_queue);
         steps.push(stage('held', 'alert', 'Results combined · held', esc(names ? names + ' escalated.' : 'A package was escalated.')));
         steps.push(stage('held', 'send', 'Team alerted', esc((queue || 'The responsible queue') + ' was messaged in team chat.')));
-        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open — reprocess, cancel the package or cancel the order.') : (o.resolution ? 'Decided: ' + esc(o.resolution.label) + '.' : 'The review step closed without a decision from the console.')));
+        steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open: reprocess, cancel the package or cancel the order.') : (o.resolution ? 'Decided: ' + esc(o.resolution.label) + '.' : 'The review step closed without a decision from the console.')));
         var dec = o.resolution && o.resolution.decision;
         steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer notice', waiting ? '' : dec === 'cancel_order'
           ? 'The workflow drafted its usual delay notice; the console wrote the cancellation notice to send instead.'
@@ -449,7 +449,7 @@
       var faults = (rec.fault_rules || []).map(function (f) { return f.package; }).filter(function (p, i, a) { return a.indexOf(p) === i; });
       var heldPk = res.held_packages || [];
       var m = CA.modal('Send the order again',
-        '<p style="margin-bottom:12px">A new run starts with these details. Correct what caused the hold' + (pre && Object.keys(pre).length ? ' — the corrections from the decision are already filled in' : '') + '.</p>' +
+        '<p style="margin-bottom:12px">A new run starts with these details. Correct what caused the hold' + (pre && Object.keys(pre).length ? ', and the corrections from the decision are already filled in' : '') + '.</p>' +
         correctionFields(o, temp) +
         (faults.length ? '<div style="margin-top:14px"><h3 class="section-title">Simulated faults in this example</h3>' + faults.map(function (p) {
           return '<label class="check" style="margin-bottom:6px"><input type="checkbox" class="rp-clear" value="' + esc(p) + '"' + (heldPk.indexOf(p) >= 0 ? ' checked' : '') + '> Clear the ' + esc(PKG_LABEL[p].toLowerCase()) + ' fault, as the correction fixes it</label>';
@@ -475,7 +475,7 @@
       var end = Date.parse(o.waitingSince) + o.reviewWindowMinutes * 60000;
       function upd() {
         var left = Math.max(0, Math.round((end - Date.now()) / 1000));
-        cd.textContent = left ? Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') : 'closing — the workflow may time the run out';
+        cd.textContent = left ? Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') : 'closing, the workflow may time the run out';
       }
       upd(); tick = setInterval(upd, 1000);
     }

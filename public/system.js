@@ -32,7 +32,7 @@
       document.getElementById('wh').innerHTML = '<dl class="kv" style="margin-bottom:14px">' +
         '<dt>Webhook address</dt><dd><span class="code-chip" style="white-space:normal;overflow-wrap:anywhere">' + esc(url) + '/••••••</span>' +
         '<p class="small muted" style="margin-top:4px">The address ends with the webhook secret, which is kept out of this page. The full address is in the internal deployment notes.</p></dd>' +
-        '<dt>Secret</dt><dd>' + (w.secretSet ? '<span class="pill ok">Set</span>' : '<span class="pill warn">Not set — calls are refused</span>') + '</dd>' +
+        '<dt>Secret</dt><dd>' + (w.secretSet ? '<span class="pill ok">Set</span>' : '<span class="pill warn">Not set, so calls are refused</span>') + '</dd>' +
         '<dt>Storage</dt><dd>' + (w.storage === 'redis' ? 'Redis' : '<span class="pill warn">In memory</span> tasks can land on a different server instance and be lost; connect Redis') + '</dd></dl>' +
         '<h3 class="section-title">Last calls from Opus</h3>' +
         (rows ? '<div class="table-wrap"><table><thead><tr><th>Time</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<p class="small muted">No calls since the orders were last cleared.</p>');

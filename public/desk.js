@@ -7,7 +7,7 @@
     var app = document.getElementById('app');
     var state = { queue: 'all', orders: [] };
     app.innerHTML =
-      '<div class="page-head"><div><h1>Fallout desk</h1><p>Orders the workflow could not complete on its own. Open each one and decide it here — reprocess, cancel the package or cancel the order. The decision goes straight back to the workflow.</p></div></div>' +
+      '<div class="page-head"><div><h1>Fallout desk</h1><p>Orders the workflow could not complete on its own. Open each one and decide it here: reprocess, cancel the package or cancel the order. The decision goes straight back to the workflow.</p></div></div>' +
       '<div class="kpis" id="kpis"></div>' +
       '<section class="card flush" style="margin-bottom:16px"><div class="card-head pad"><div><h2>Waiting for a decision</h2><p id="w-sub"></p></div>' +
       '<div class="seg-choice" role="group" aria-label="Queue" id="queues"></div></div>' +
@@ -42,7 +42,7 @@
         kpi('Ready to decide now', inReview, inReview ? 'the workflow is waiting' : 'none waiting', inReview ? 'warn' : '') +
         kpi('Waiting for a decision', open.length, open.length ? 'held orders' : 'queue is clear', open.length ? 'warn' : 'ok') +
         kpi('Decided this month', doneMonth, 'on this desk', '') +
-        kpi('Most common error', top || (tied ? 'No single one' : '—'), top ? codes[top] + ' open · ' + (findText(top) || '') : tied ? ranked.length + ' codes, ' + codes[ranked[0]] + ' open each' : 'nothing open', '');
+        kpi('Most common error', top || (tied ? 'No single one' : 'None'), top ? codes[top] + ' open · ' + (findText(top) || '') : tied ? ranked.length + ' codes, ' + codes[ranked[0]] + ' open each' : 'nothing open', '');
 
       var queues = ['all'].concat(Object.keys(CA.QUEUES));
       document.getElementById('queues').innerHTML = queues.map(function (q) {
@@ -56,9 +56,9 @@
       document.getElementById('open').innerHTML = list.length ? list.map(function (o) {
         var waiting = o.stage === 'with_desk';
         return '<tr class="clickable" data-id="' + esc(o.id) + '"><td data-h="Order" class="id-cell"><a href="/order.html?id=' + encodeURIComponent(o.id) + '"><strong>' + esc(o.orderId) + '</strong></a><span class="sub">' + esc(o.customer) + ' · ' + esc(o.planName) + '</span></td>' +
-          '<td data-h="Package">' + (waiting && !(o.heldPackages || []).length ? '<span class="muted">Not reported yet</span>' : esc((o.heldPackages || []).map(function (p) { return PKG[p] || p; }).join(', ') || '—')) + '<span class="sub">' + esc(CA.QUEUES[o.reviewQueue] || '') + '</span></td>' +
-          '<td data-h="Error">' + (o.errorCode ? '<span class="code-chip">' + esc(o.errorCode) + '</span><span class="sub">' + esc(o.errorText) + '</span>' : '—') + '</td>' +
-          '<td data-h="Why">' + esc(CA.REASONS[o.escalationReason] || (waiting ? '—' : CA.words(o.escalationReason) || '—')) + '</td>' +
+          '<td data-h="Package">' + (waiting && !(o.heldPackages || []).length ? '<span class="muted">Not reported yet</span>' : esc((o.heldPackages || []).map(function (p) { return PKG[p] || p; }).join(', ') || 'Not reported')) + '<span class="sub">' + esc(CA.QUEUES[o.reviewQueue] || '') + '</span></td>' +
+          '<td data-h="Error">' + (o.errorCode ? '<span class="code-chip">' + esc(o.errorCode) + '</span><span class="sub">' + esc(o.errorText) + '</span>' : 'Not reported') + '</td>' +
+          '<td data-h="Why">' + esc(CA.REASONS[o.escalationReason] || (waiting ? 'Not reported' : CA.words(o.escalationReason) || 'Not reported')) + '</td>' +
           '<td class="num" data-h="Attempts">' + esc(String(attempts(o))) + '</td>' +
           '<td>' + (o.reviewOpen ? '<span class="pill info">Ready to decide</span>' : CA.pill(o)) + '<span class="sub">held ' + esc(CA.ago(o.waitingSince || o.finishedAt || o.submittedAt)) + '</span></td>' +
           '<td class="num"><a class="btn small' + (o.reviewOpen ? ' primary' : '') + '" href="/order.html?id=' + encodeURIComponent(o.id) + '#decide">' + (o.reviewOpen || o.stage === 'held' ? 'Decide' : 'Open') + '</a></td></tr>';
@@ -66,13 +66,13 @@
 
       document.getElementById('done').innerHTML = done.length ? done.slice(0, 15).map(function (o) {
         return '<tr class="clickable" data-id="' + esc(o.id) + '"><td data-h="Order" class="id-cell"><a href="/order.html?id=' + encodeURIComponent(o.id) + '"><strong>' + esc(o.orderId) + '</strong></a><span class="sub">' + esc(o.customer) + '</span></td>' +
-          '<td data-h="Error">' + (o.errorCode ? '<span class="code-chip">' + esc(o.errorCode) + '</span>' : '—') + '</td>' +
+          '<td data-h="Error">' + (o.errorCode ? '<span class="code-chip">' + esc(o.errorCode) + '</span>' : 'None') + '</td>' +
           '<td data-h="Resolution"><strong>' + esc(o.resolution.label) + '</strong></td>' +
           '<td data-h="Note">' + esc(o.resolution.note.length > 90 ? o.resolution.note.slice(0, 88) + '…' : o.resolution.note) + '</td>' +
           '<td data-h="By"><span class="nm">' + esc(o.resolution.by) + '</span>' + '<span class="sub">' + esc(CA.ago(o.resolution.at)) + '</span></td></tr>';
       }).join('') : '<tr><td colspan="5" class="empty"><strong>No decisions yet</strong>Decide a held order and it is listed here.</td></tr>';
     }
-    function attempts(o) { return o.attemptsMade == null || !o.attemptsMade ? '—' : o.attemptsMade; }
+    function attempts(o) { return o.attemptsMade == null || !o.attemptsMade ? 'Not reported' : o.attemptsMade; }
     function findText(code) { var o = state.orders.find(function (x) { return x.errorCode === code; }); return o ? o.errorText : ''; }
     function kpi(label, value, sub, cls) {
       return '<div class="kpi ' + cls + '"><span class="kpi-label">' + esc(label) + '</span><span class="kpi-value">' + esc(value) + '</span><span class="kpi-sub">' + esc(sub) + '</span></div>';

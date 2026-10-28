@@ -103,7 +103,7 @@
       var rules = state.extras.fault_rules;
       var t = rules.length ? rules.map(function (r) {
         return r.package.toLowerCase() + ' fails with ' + r.error_code + ' on attempt' + (r.attempts_failing.length > 1 ? 's ' : ' ') + r.attempts_failing.join(', ') + (r.fixable ? (Object.keys(r.fix_patch || {}).length ? ', then is fixed automatically' : ', the automatic fix finds nothing to change') : ', no automatic fix');
-      }).join('; ') : 'none — every package is set to succeed';
+      }).join('; ') : 'none, every package is set to succeed';
       document.getElementById('extras-text').textContent = 'Simulated faults: ' + t + '. These are kept when you submit, so the order follows the path described.';
       document.getElementById('extras').hidden = false;
       Array.prototype.forEach.call(document.querySelectorAll('.sample'), function (b) { b.classList.toggle('active', b.getAttribute('data-k') === x.key); });

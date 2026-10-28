@@ -34,13 +34,13 @@
         body.innerHTML = '<div class="card empty"><strong>No orders in ' + esc(monthName(r.month)) + '</strong>Reports fill in as orders are submitted and finish.</div>';
         return;
       }
-      var pct = function (n, d) { return d ? Math.round(100 * n / d) + '%' : '—'; };
+      var pct = function (n, d) { return d ? Math.round(100 * n / d) + '%' : 'n/a'; };
       body.innerHTML =
         '<div class="kpis" style="margin-bottom:0">' +
         kpi('Orders submitted', t.submitted, [t.inFlight ? t.inFlight + ' running' : '', t.failed ? t.failed + ' did not finish' : ''].filter(Boolean).join(' · ') || 'all reached an outcome', '') +
         kpi('Activated', pct(t.activated, t.submitted), t.activated + ' of ' + t.submitted + ' submitted', 'ok') +
         kpi('Held now', t.held, (t.heldAtSomePoint ? t.heldAtSomePoint + ' held at some point this month' : 'none held') + (t.awaitingDecision ? ' · ' + t.awaitingDecision + ' waiting' : ''), t.held ? 'warn' : '') +
-        kpi('Attempts before a hold', t.heldAtSomePoint ? t.avgAttemptsHeld : '—', t.heldAtSomePoint ? 'average over the ' + t.heldAtSomePoint + ' held this month' : 'nothing held this month', '') + '</div>' +
+        kpi('Attempts before a hold', t.heldAtSomePoint ? t.avgAttemptsHeld : 'None', t.heldAtSomePoint ? 'average over the ' + t.heldAtSomePoint + ' held this month' : 'nothing held this month', '') + '</div>' +
 
         '<section class="card"><div class="card-head"><div><h2>Outcomes</h2><p>Where this month\'s orders ended up.</p></div></div>' +
         legend() +
@@ -72,7 +72,7 @@
     function daily(days) {
       var max = Math.max.apply(null, days.map(function (d) { return d.activated + d.held + d.other; }).concat([1]));
       return '<div class="cols">' + days.map(function (d) {
-        var tip = CA.fmtDate(d.day) + ' — activated ' + d.activated + ', held ' + d.held + ', other ' + d.other;
+        var tip = CA.fmtDate(d.day) + ': activated ' + d.activated + ', held ' + d.held + ', other ' + d.other;
         return '<div class="col" title="' + esc(tip) + '" aria-label="' + esc(tip) + '" role="img">' +
           ['activated', 'held', 'other'].map(function (k, i) { return d[k] ? '<span style="height:' + (100 * d[k] / max) + '%;background:' + SERIES[i].color + '"></span>' : ''; }).join('') + '</div>';
       }).join('') + '</div><div class="col-labels">' + days.map(function (d, i) {
@@ -84,7 +84,7 @@
     function barsCard(title, sub, rows, held, heads) {
       var max = Math.max.apply(null, rows.map(function (x) { return x.n; }).concat([1]));
       var inner = rows.length ? '<div class="bars">' + rows.map(function (x) {
-        return '<div class="bar-row" title="' + esc(x.label + (x.sub ? ' — ' + x.sub : '') + ': ' + x.n) + '"><span class="b-label">' + esc(x.label) + (x.sub ? '<small>' + esc(x.sub) + '</small>' : '') + '</span>' +
+        return '<div class="bar-row" title="' + esc(x.label + (x.sub ? ', ' + x.sub : '') + ': ' + x.n) + '"><span class="b-label">' + esc(x.label) + (x.sub ? '<small>' + esc(x.sub) + '</small>' : '') + '</span>' +
           '<span class="b-track"><span class="b-fill' + (held ? ' held' : '') + '" style="width:' + (100 * x.n / max) + '%;display:block"></span></span><span class="b-num">' + x.n + '</span></div>';
       }).join('') + '</div>' + tableView(heads, rows.map(function (x) { return x.sub !== undefined ? [x.label, x.sub, x.n] : [x.label, x.n]; })) : '<p class="muted small">Nothing to show for this month.</p>';
       return '<section class="card"><div class="card-head"><div><h2>' + esc(title) + '</h2>' + (sub ? '<p>' + esc(sub) + '</p>' : '') + '</div></div>' + inner + '</section>';
