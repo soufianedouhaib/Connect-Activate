@@ -50,7 +50,7 @@
         var tg = document.getElementById('rl-toggle'); if (tg) tg.addEventListener('click', function (e) { e.preventDefault(); showDeleted = !showDeleted; loadRuns(); });
         document.getElementById('rl').innerHTML = runs.length ? runs.map(function (r) {
           return '<tr><td data-h="Order"><strong>' + esc(r.orderId || r.id) + '</strong><span class="sub">' + esc(r.id) + '</span></td>' +
-            '<td>' + (r.stage === 'deleted' ? '<span class="pill plain">Cleared</span>' : CA.pill({ stage: r.stage })) + '</td>' +
+            '<td>' + (r.stage === 'deleted' ? '<span class="pill plain">Cleared</span>' : CA.pill({ stage: r.stage, resolution: r.resolution, reprocessedAs: r.reprocessedAs })) + '</td>' +
             '<td class="num" data-h="Events">' + r.count + (r.errors ? ' <span class="tag" style="color:var(--bad)">' + r.errors + ' error' + (r.errors > 1 ? 's' : '') + '</span>' : '') + '</td>' +
             '<td data-h="Last">' + esc(r.lastMessage || '') + '<span class="sub">' + esc(CA.fmtDate(r.last, true)) + '</span></td>' +
             '<td class="num"><button class="btn small" type="button" data-run="' + esc(r.id) + '">Open</button></td></tr>';

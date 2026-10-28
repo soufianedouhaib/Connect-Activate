@@ -152,7 +152,7 @@
         { href: '/overview.html', label: 'Overview', icon: 'home' },
         { href: '/', label: 'Orders', icon: 'list', match: ['/', '/index.html', '/order.html'] },
         { href: '/submit.html', label: 'New order', icon: 'plus', roles: ['coordinator', 'admin'] },
-        { href: '/desk.html', label: 'Fallout desk', icon: 'desk', roles: ['desk', 'admin'], badge: true }
+        { href: '/desk.html', label: 'Fallout Desk', icon: 'desk', roles: ['desk', 'admin'], badge: true }
       ] },
       { title: 'Insight', items: [{ href: '/report.html', label: 'Reports', icon: 'chart' }] },
       { title: 'Administration', roles: ['admin'], items: [

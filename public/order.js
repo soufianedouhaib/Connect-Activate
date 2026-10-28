@@ -112,7 +112,7 @@
           return esc(CA.nb(PKG_LABEL[f.package] + ' failed with ' + f.errorCode + ' on ' + (f.when || 'attempt ' + f.attempt) + '. ' + f.summary));
         }).join('<br>') + '</div>' : '';
         return '<section class="card"><div class="result-hero ' + (ok ? 'ok' : 'bad') + '"><div class="mark">' + icon(ok ? 'checkCircle' : 'alert') + '</div><div>' +
-          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (o.droppedPackage === 'LOGISTICS' ? 'Billing and network activation completed, final validation passed and the order is closed. The modem shipment was dropped at the Fallout Desk, so no modem is sent.' : rec2.length ? 'Every package completed after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
+          '<h2>' + (ok ? 'Service activated' : 'Final checks did not pass') + '</h2><p>' + (ok ? (o.droppedPackage === 'LOGISTICS' ? 'Billing and network activation completed, final validation passed and the order is closed. The modem shipment was dropped at the Fallout Desk, so no modem is sent.' : rec2.length ? 'Every package completed, ' + joinNames(rec2.map(function (f) { return f.package; }).filter(function (p, i, a) { return a.indexOf(p) === i; })) + ' after an automatic fix, final validation passed and the order is closed.' : 'All three packages completed, final validation passed and the order is closed.') + ' The welcome message below is ready for the customer.' : 'The packages reported complete but final validation found a gap, so the order was not closed as active.') + '</p></div></div>' +
           '<div class="tiles">' +
           tile('Activation reference', res.activation_reference || 'Not returned') +
           tile('Plan', (res.plan_name || (rec.plan || {}).name || 'Not reported')) +
@@ -138,7 +138,7 @@
       }
       var title = o.stage === 'timed_out' ? 'The run timed out' : o.stage === 'cancelled' ? 'The run was cancelled' : 'The run did not finish';
       return '<section class="card"><div class="result-hero bad"><div class="mark">' + icon('x') + '</div><div><h2>' + title + '</h2>' +
-        '<p>' + esc(o.failure || 'The workflow reported the run as ' + CA.words(o.opusStatus || 'failed') + '.') + '</p>' +
+        '<p>' + esc(o.failure || 'The workflow reported the run as ' + CA.words(o.opusStatus || 'failed').toLowerCase() + '.') + '</p>' +
         (o.stage === 'timed_out' && o.waitingSince ? '<p class="small muted" style="margin-top:6px">The order was waiting on the Fallout Desk. The review step closes after ' + o.reviewWindowMinutes + ' minutes without a decision.</p>' : '') +
         '</div></div></section>';
     }
@@ -246,7 +246,7 @@
         var names = joinNames(res.held_packages);
         var queue = CA.QUEUES[res.review_queue] || CA.words(res.review_queue);
         steps.push(stage('held', 'alert', 'Results combined · held', esc(names ? names + ' escalated.' : 'A package was escalated.')));
-        steps.push(stage('held', 'send', 'Team alerted', esc((queue || 'The responsible queue') + ' was messaged in team chat.')));
+        steps.push(stage('held', 'send', 'Team alerted', esc((queue || 'The responsible queue') + ' was alerted by the workflow\'s Hold Order and Alert Team step.')));
         steps.push(stage(waiting ? 'now' : 'done', waiting ? 'pause' : 'check', 'Fallout Desk review', waiting ? (o.review && o.review.status === 'sent' ? 'Decision sent: ' + esc((o.resolution || {}).label || '') + '.' : 'Open: reprocess, cancel the package or cancel the order.') : (o.resolution ? 'Decided: ' + esc(o.resolution.label) + '.' : 'The review step closed without a decision from the console.')));
         var dec = o.resolution && o.resolution.decision;
         steps.push(stage(waiting ? 'skip' : 'done', waiting ? 'clock' : 'send', 'Customer notice', waiting ? '' : dec === 'cancel_order'

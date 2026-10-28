@@ -13,7 +13,7 @@
     app.innerHTML =
       '<div class="page-head"><div><p class="eyebrow">' + esc(new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })) + '</p>' +
       '<h1>' + greet + ', ' + esc(first) + '</h1><p>' + (isDesk ? 'Held orders that need a decision, and how activations are going this month.' : 'Your orders that need attention, and how they are going this month.') + '</p></div>' +
-      (canSubmit ? '<a class="btn primary" href="/submit.html">' + icon('upload') + 'New order</a>' : '<a class="btn primary" href="/desk.html">' + icon('desk') + 'Open the Fallout desk</a>') + '</div>' +
+      (canSubmit ? '<a class="btn primary" href="/submit.html">' + icon('upload') + 'New order</a>' : '<a class="btn primary" href="/desk.html">' + icon('desk') + 'Open the Fallout Desk</a>') + '</div>' +
       '<div class="kpis" id="kpis"></div>' +
       '<div class="grid-2"><section class="card flush"><div class="card-head pad"><div><h2>Needs attention</h2><p id="att-sub">Checking…</p></div></div><ul class="list" id="att"></ul></section>' +
       '<section class="card flush"><div class="card-head pad"><div><h2>Recent orders</h2><p id="recent-sub"></p></div><a class="btn small" href="/">All orders</a></div><div class="table-wrap"><table class="collapse"><thead><tr><th>Order</th><th>Plan</th><th>Status</th></tr></thead><tbody id="recent"></tbody></table></div></section></div>';

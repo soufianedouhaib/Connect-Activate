@@ -7,7 +7,7 @@
     var app = document.getElementById('app');
     var state = { queue: 'all', orders: [] };
     app.innerHTML =
-      '<div class="page-head"><div><h1>Fallout desk</h1><p>Orders the workflow could not complete on its own. Open each one and decide it here: reprocess, cancel the package or cancel the order. The decision goes straight back to the workflow.</p></div></div>' +
+      '<div class="page-head"><div><h1>Fallout Desk</h1><p>Orders the workflow could not complete on its own. Open each one and decide it here: reprocess, cancel the package or cancel the order. The decision goes straight back to the workflow.</p></div></div>' +
       '<div class="kpis" id="kpis"></div>' +
       '<section class="card flush" style="margin-bottom:16px"><div class="card-head pad"><div><h2>Waiting for a decision</h2><p id="w-sub"></p></div>' +
       '<div class="seg-choice" role="group" aria-label="Queue" id="queues"></div></div>' +

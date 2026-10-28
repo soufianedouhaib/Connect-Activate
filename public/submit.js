@@ -25,7 +25,7 @@
       '<section class="card"><div class="card-head"><div><h2>Example orders</h2><p>Each one takes a different path through the workflow. Pick one to fill the form, then change anything you like.</p></div></div>' +
       '<div class="samples" id="samples">' + cat.examples.map(function (x) {
         var cls = /^Activated/.test(x.expect) ? 'ok' : 'warn';
-        return '<button class="sample" type="button" data-k="' + esc(x.key) + '"><span class="sample-title">' + esc(x.title) + '</span><span class="sample-desc">' + esc(x.blurb) + '</span><span class="pill ' + cls + '">Expected: ' + esc(x.expect) + '</span></button>';
+        return '<button class="sample" type="button" data-k="' + esc(x.key) + '"><span class="sample-title">' + esc(x.title) + '</span><span class="sample-desc">' + esc(CA.nb(x.blurb)) + '</span><span class="pill ' + cls + '">Expected: ' + esc(x.expect) + '</span></button>';
       }).join('') + '</div></section>' +
 
       '<section class="card"><div class="card-head"><div><h2>Order details</h2><p id="mode-note">Fill in the order, or paste a full order record.</p></div>' +
