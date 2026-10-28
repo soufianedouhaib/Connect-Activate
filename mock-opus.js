@@ -128,8 +128,8 @@ function runWorkflow(rec) {
     attempts_made: (packages[f0.failed_step] || {}).attempts || 0,
     completed_packages: Object.keys(packages).filter((k) => ['COMPLETED', 'NOT_REQUIRED'].indexOf(packages[k].status) >= 0)
   };
-  // The live delay notice, as the workflow drafts it for every decision (em dash and all).
-  const delay = first + ', we’re sorry—your ' + os.brand + ' connection is taking longer than expected. A specialist is working on it now.';
+  // The live delay notice, as the workflow drafts it for every decision (no dashes since v123).
+  const delay = 'Hi ' + first + ', we’re sorry, your ' + os.brand + ' connection is taking longer than expected. A specialist is working on it now.';
   // By default reproduce what the live run returns after the review: the delay-notice step passes
   // Hold Ctx on with only the keys its schema lists, so Record Hold writes blanks.
   const ctxAfter = process.env.MOCK_TRIM_HOLD === '0' ? holdCtx : { order_id: os.order_id };
