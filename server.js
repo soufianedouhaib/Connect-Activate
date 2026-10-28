@@ -1026,7 +1026,7 @@ app.get('/api/runlogs', need('admin'), wrap(async (req, res) => {
   const idx = await store.hgetall(RUNLOG_INDEX);
   const orders = await allOrders();
   const list = Object.values(idx || {}).map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean)
-    .map((x) => { const o = orders.find((y) => y.id === x.id); return Object.assign(x, { orderId: o ? o.record.order_id : (x.orderId || null), stage: o ? rowStage(o) : 'deleted' }); })
+    .map((x) => { const o = orders.find((y) => y.id === x.id); return Object.assign(x, { orderId: o ? o.record.order_id : (x.orderId || null), stage: o ? rowStage(o) : 'deleted', resolution: o && o.resolution ? { decision: o.resolution.decision } : null, reprocessedAs: o ? o.reprocessedAs || null : null }); })
     .sort((a, b) => (b.last || '').localeCompare(a.last || ''));
   res.json({ runs: list.slice(0, 200) });
 }));
